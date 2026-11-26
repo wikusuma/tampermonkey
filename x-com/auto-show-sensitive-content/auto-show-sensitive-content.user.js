@@ -9,8 +9,8 @@
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=x.com
 // @grant        none
 // @license      MIT
-// @updateURL    https://raw.githubusercontent.com/wikusuma/tampermonkey/main/x-com/
-// @downloadURL  https://raw.githubusercontent.com/wikusuma/tampermonkey/main/youtube-com/url-exporter-suite/url-exporter-suite.user.js
+// @updateURL    https://github.com/wikusuma/tampermonkey/tree/main/x-com/auto-show-sensitive-content/auto-show-sensitive-content.user.js
+// @downloadURL  https://github.com/wikusuma/tampermonkey/tree/main/x-com/auto-show-sensitive-content/auto-show-sensitive-content.user.js
 // ==/UserScript==
 
 //For Profile caution
