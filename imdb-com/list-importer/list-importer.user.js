@@ -5,8 +5,8 @@
 // @version         11.2
 // @license         GNU General Public License v3.0 or later
 // @description     Import batch titles/people into IMDb lists with CSRF handling and dynamic DOM injection
-// @updateURL       https://raw.githubusercontent.com/wikusuma/tampermonkey/main/imdb-com/list-importer/list-importer.js
-// @downloadURL     https://raw.githubusercontent.com/wikusuma/tampermonkey/main/imdb-com/list-importer/list-importer.js
+// @updateURL       https://raw.githubusercontent.com/wikusuma/tampermonkey/main/imdb-com/list-importer/list-importer.user.js
+// @downloadURL     https://raw.githubusercontent.com/wikusuma/tampermonkey/main/imdb-com/list-importer/list-importer.user.js
 // @grant           none
 // ==/UserScript==
 
