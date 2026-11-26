@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         [IMDb] Core Enhancement
 // @namespace    https://github.com/wikusuma/tampermonkey
-// @version      1.0.14
+// @version      1.0.15
 // @description  Framework modular IMDb: Anti-Looping Switch View Enforcer, Vidfast Player, Smart CrossSearch Media & Social Icons (Title & Name), Adaptive Uindex & 1337x Query, Comprehensive Parents Guide, dan Safe On-Demand Single-Bar Scanner.
 // @author       Willy Kusuma & Dev Team
 // @match        https://*.imdb.com/title/tt*
