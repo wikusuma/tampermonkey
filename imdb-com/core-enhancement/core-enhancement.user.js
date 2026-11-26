@@ -25,8 +25,8 @@
 // @exclude      https://*.imdb.com/title/tt*/mediaindex*
 // @exclude      https://*.imdb.com/title/tt*/videogallery*
 // @exclude      https://*.imdb.com/title/tt*/plotsummary*
-// @updateURL    https://raw.githubusercontent.com/wikusuma/tampermonkey/main/imdb.com/core-enhancement/imdb-core-enhancement.user.js
-// @downloadURL  https://raw.githubusercontent.com/wikusuma/tampermonkey/main/imdb.com/core-enhancement/imdb-core-enhancement.user.js
+// @updateURL    https://raw.githubusercontent.com/wikusuma/tampermonkey/main/imdb.com/core-enhancement/core-enhancement.js
+// @downloadURL  https://raw.githubusercontent.com/wikusuma/tampermonkey/main/imdb.com/core-enhancement/core-enhancement.js
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
 // @grant        GM_getValue
