@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         IMDb Search Result Exporter for List Importer (Optimized)
+// @name         Search Result Exporter for List Importer
 // @namespace    Willy_imdb_search_exporter
-// @version      1.1
+// @version      1.2
 // @description  Ekspor hasil IMDb Search ke CSV tanpa lag / freeze
 // @author       Willy
 // @match        https://www.imdb.com/search/title/*
