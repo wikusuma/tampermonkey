@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Fresh feed
 // @namespace    http://tampermonkey.net/
-// @version      3.0.0
+// @version      3.0.1
 // @description  Fresh Youtube feed, auto "New to you" & hide watched.
 // @author       wikusuma
 // @match        https://www.youtube.com/*
