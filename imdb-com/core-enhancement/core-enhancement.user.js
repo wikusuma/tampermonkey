@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Core Enhancement
 // @namespace    https://github.com/wikusuma/tampermonkey
-// @version      1.0.16
+// @version      1.0.17
 // @description  Framework modular IMDb: Anti-Looping Switch View Enforcer, Vidfast Player, Smart CrossSearch Media & Social Icons (Title & Name), Adaptive Uindex & 1337x Query, Comprehensive Parents Guide, dan Safe On-Demand Single-Bar Scanner.
 // @author       Willy Kusuma & Dev Team
 // @match        https://*.imdb.com/title/tt*
@@ -25,8 +25,8 @@
 // @exclude      https://*.imdb.com/title/tt*/mediaindex*
 // @exclude      https://*.imdb.com/title/tt*/videogallery*
 // @exclude      https://*.imdb.com/title/tt*/plotsummary*
-// @updateURL    https://raw.githubusercontent.com/wikusuma/tampermonkey/main/imdb.com/core-enhancement/core-enhancement.js
-// @downloadURL  https://raw.githubusercontent.com/wikusuma/tampermonkey/main/imdb.com/core-enhancement/core-enhancement.js
+// @updateURL    https://raw.githubusercontent.com/wikusuma/tampermonkey/main/imdb.com/core-enhancement/core-enhancement.user.js
+// @downloadURL  https://raw.githubusercontent.com/wikusuma/tampermonkey/main/imdb.com/core-enhancement/core-enhancement.user.js
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
 // @grant        GM_getValue
