@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         YouTube URL Exporter Suite (Playlist & Search)
+// @name         URL Exporter Suite
 // @namespace    https://github.com/wikusuma/tampermonkey
-// @version      1.0.0
+// @version      1.0.1
 // @description  Ekstrak & unduh daftar URL video YouTube (.txt) dengan auto-scroll untuk halaman Playlist maupun Hasil Pencarian/Channel.
 // @author       wikusuma
 // @match        https://www.youtube.com/*
