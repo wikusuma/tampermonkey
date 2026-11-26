@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Auto-Scraper to Markdown (with Metrics)
+// @name         Auto-Scraper to Markdown
 // @namespace    http://tampermonkey.net/
 // @version      1.1
 // @description  Auto scroll timeline postingan X, ekstrak teks, link, replies, reposts, likes, views/trend, bookmarks, dan simpan sebagai file Markdown.
