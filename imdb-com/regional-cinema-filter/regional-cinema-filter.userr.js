@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         IMDb Regional Cinema Filter v.1.1.1
+// @name         Regional Cinema Filter
 // @namespace    https://github.com/imdb-master-suite
 // @version      1.1.1
 // @description  Sistem Filter Benua (Timur/Barat) dengan Zero-Idle Cost (Tidak memindai jika posisi All).
