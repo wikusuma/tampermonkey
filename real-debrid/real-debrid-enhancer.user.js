@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Real-Debrid Enhancer (Hardened & Private Edition) v.1.1
+// @name         Real-Debrid Enhancer
 // @namespace    local.tampermonkey
-// @version      1.1-hardened
+// @version      1.2
 // @description  Aman tanpa dependency luar. Hanya aktif di /torrents dan /downloader. Multi-select via checkbox, copy link batch, debrid batch, dan bulk delete terpilih.
 // @author       Custom Hardened
 // @match        https://real-debrid.com/torrents*
