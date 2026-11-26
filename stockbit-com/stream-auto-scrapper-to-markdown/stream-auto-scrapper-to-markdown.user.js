@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Stockbit Stream Auto-Scraper to Markdown
+// @name         Stream Auto-Scraper to Markdown
 // @namespace    http://tampermonkey.net/
-// @version      2.0
+// @version      2.1
 // @description  Scrape postingan Stockbit Stream (/stream & /symbol/*), auto scroll, auto read more, dan export ke Markdown.
 // @author       You
 // @match        https://stockbit.com/*
