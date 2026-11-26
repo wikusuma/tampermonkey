@@ -1,12 +1,12 @@
 // ==UserScript==
-// @name         [YouTube] Fresh Feed (Auto "New to you" & Hide Watched)
+// @name         Fresh feed
 // @namespace    http://tampermonkey.net/
 // @version      3.0.0
-// @description  Otomatis mengaktifkan filter "New to you" secara akurat saat refresh/navigasi dan menyembunyikan video yang sudah ditonton.
+// @description  Fresh Youtube feed, auto "New to you" & hide watched.
 // @author       wikusuma
 // @match        https://www.youtube.com/*
-// @updateURL    https://raw.githubusercontent.com/wikusuma/tampermonkey/main/youtube-com/fresh-feed/yt-fresh-feed.user.js
-// @downloadURL  https://raw.githubusercontent.com/wikusuma/tampermonkey/main/youtube-com/fresh-feed/yt-fresh-feed.user.js
+// @updateURL    https://raw.githubusercontent.com/wikusuma/tampermonkey/main/youtube-com/fresh-feed/fresh-feed.user.js
+// @downloadURL  https://raw.githubusercontent.com/wikusuma/tampermonkey/main/youtube-com/fresh-feed/fresh-feed.user.js
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
