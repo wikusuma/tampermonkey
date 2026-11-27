@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Auto-Scraper to Markdown
 // @namespace    http://tampermonkey.net/
-// @version      1.6
-// @description  Auto scrape search + thread lanjutan dengan state persisten lintas navigasi, atau auto-scroll satu postingan/thread penuh beserta sentimen balasannya ke Markdown.
+// @version      1.7
+// @description  Auto scrape search + buka thread hanya untuk postingan yang punya reply (> 0), atau auto-scroll satu postingan/thread penuh beserta balasan ke Markdown.
 // @author       You
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -14,9 +14,10 @@
 (function () {
   'use strict';
 
-  const STORAGE_KEY = 'x_auto_scraper_v16_state';
+  const STORAGE_KEY = 'x_auto_scraper_v17_state';
 
   let isScraping = false;
+  let isExporting = false;
   let tweetsMap = new Map();
   let scrollInterval = null;
   let expandTimer = 0;
@@ -24,12 +25,12 @@
   let lastHeight = 0;
   let lastUrl = location.href;
 
-  // State khusus Mode Search -> Drill Thread
+  // State khusus Mode Search -> Drill Thread (hanya yang punya reply > 0)
   let queuedThreadUrls = [];
   let visitedThreadIds = new Set();
   let searchOriginUrl = '';
   let currentDrillUrl = '';
-  let maxSearchThreads = 15;
+  let maxSearchThreads = 25;
   let autoExportOnFinish = true;
 
   let modeBadge = null;
@@ -140,30 +141,52 @@
     return handleMatch ? handleMatch[1].toLowerCase() : '';
   }
 
+  function parseCountToNumber(rawVal) {
+    if (!rawVal) return 0;
+    const cleaned = String(rawVal).trim().replace(/,/g, '');
+    const m = cleaned.match(/^([\d.]+)\s*([KMB])?$/i);
+    if (!m) {
+      const digits = cleaned.match(/[\d.]+/);
+      return digits ? parseFloat(digits[0]) || 0 : 0;
+    }
+    const num = parseFloat(m[1]) || 0;
+    const suffix = (m[2] || '').toUpperCase();
+    if (suffix === 'K') return Math.round(num * 1000);
+    if (suffix === 'M') return Math.round(num * 1000000);
+    if (suffix === 'B') return Math.round(num * 1000000000);
+    return Math.round(num);
+  }
+
   function getMetricValue(container, testId) {
-    const btn = container.querySelector(`button[data-testid="${testId}"], a[data-testid="${testId}"]`);
+    const btn = container.querySelector(
+      `button[data-testid="${testId}"], a[data-testid="${testId}"], [data-testid="${testId}"]`
+    );
     if (!btn) return '0';
 
     const textSpan = btn.querySelector('span[data-testid="app-text-transition-container"]') || btn.querySelector('span');
     const textVal = textSpan ? (textSpan.innerText || '').trim() : (btn.innerText || '').trim();
-    if (textVal) return textVal;
+    if (textVal && /\d/.test(textVal)) return textVal;
 
     const aria = btn.getAttribute('aria-label') || '';
-    const match = aria.match(/\d[\d,\.]*[KMB]?/i);
-    return match ? match[0] : '0';
+    const ariaMatch = aria.match(/(\d[\d,\.]*\s*[KMB]?)/i);
+    if (ariaMatch) return ariaMatch[1].trim();
+
+    return '0';
   }
 
   function getViewsValue(container) {
-    const viewsEl = container.querySelector('a[href*="/analytics"], a[href*="/status/"][aria-label*="views" i], a[aria-label*="views" i], a[aria-label*="tayangan" i]');
+    const viewsEl = container.querySelector(
+      'a[href*="/analytics"], a[href*="/status/"][aria-label*="views" i], a[aria-label*="views" i], a[aria-label*="tayangan" i]'
+    );
     if (!viewsEl) return '0';
 
     const viewsSpan = viewsEl.querySelector('span[data-testid="app-text-transition-container"]') || viewsEl.querySelector('span');
     const spanText = viewsSpan ? (viewsSpan.innerText || '').trim() : '';
-    if (spanText) return spanText;
+    if (spanText && /\d/.test(spanText)) return spanText;
 
     const aria = viewsEl.getAttribute('aria-label') || '';
-    const match = aria.match(/\d[\d,\.]*[KMB]?/i);
-    return match ? match[0] : ((viewsEl.innerText || '').trim() || '0');
+    const match = aria.match(/(\d[\d,\.]*\s*[KMB]?)/i);
+    return match ? match[1].trim() : ((viewsEl.innerText || '').trim() || '0');
   }
 
   function clickExpandButtons() {
@@ -277,8 +300,8 @@
     return { author, handle };
   }
 
-  function enqueueThreadUrl(url) {
-    if (!url) return;
+  function enqueueThreadUrlIfHasReplies(url, replyCountNum) {
+    if (!url || replyCountNum <= 0) return;
     const id = extractTweetIdFromUrl(url);
     if (!id || visitedThreadIds.has(id)) return;
     if (queuedThreadUrls.some(u => extractTweetIdFromUrl(u) === id)) return;
@@ -295,8 +318,16 @@
 
       if (!tweetText && !tweetUrl) return;
 
-      if (isSearchPage() && drillSearchCheckbox && drillSearchCheckbox.checked && tweetUrl) {
-        enqueueThreadUrl(tweetUrl);
+      const replies = getMetricValue(container, 'reply');
+      const replyCountNum = parseCountToNumber(replies);
+      const reposts = getMetricValue(container, 'retweet');
+      const likes = getMetricValue(container, 'like');
+      const bookmarks = getMetricValue(container, 'bookmark');
+      const views = getViewsValue(container);
+
+      // Hanya buka thread jika berada di halaman Search, opsi aktif, dan jumlah reply > 0
+      if (isSearchPage() && drillSearchCheckbox && drillSearchCheckbox.checked && tweetUrl && replyCountNum > 0) {
+        enqueueThreadUrlIfHasReplies(tweetUrl, replyCountNum);
       }
 
       const rawTextSnippet = (container.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 100);
@@ -306,12 +337,6 @@
       const timestamp = timeEl
         ? (timeEl.getAttribute('datetime') || (timeEl.innerText || '').trim())
         : '';
-
-      const replies = getMetricValue(container, 'reply');
-      const reposts = getMetricValue(container, 'retweet');
-      const likes = getMetricValue(container, 'like');
-      const bookmarks = getMetricValue(container, 'bookmark');
-      const views = getViewsValue(container);
 
       let role = isSearchPage() ? 'search_result' : 'timeline';
       if (ctx.isThreadPage) {
@@ -334,6 +359,7 @@
         sourceContext: currentDrillUrl || location.href,
         content: tweetText,
         replies,
+        replyCountNum,
         reposts,
         likes,
         views,
@@ -352,13 +378,16 @@
           role: (prev.role === 'timeline' || prev.role === 'search_result') && role !== prev.role ? role : prev.role,
           content: prev.content || payload.content,
           url: prev.url || payload.url,
-          timestamp: prev.timestamp || payload.timestamp
+          timestamp: prev.timestamp || payload.timestamp,
+          replies: (replyCountNum > (prev.replyCountNum || 0)) ? replies : prev.replies,
+          replyCountNum: Math.max(prev.replyCountNum || 0, replyCountNum)
         };
         if (
           updated.role !== prev.role ||
           updated.content !== prev.content ||
           updated.url !== prev.url ||
-          updated.timestamp !== prev.timestamp
+          updated.timestamp !== prev.timestamp ||
+          updated.replyCountNum !== (prev.replyCountNum || 0)
         ) {
           tweetsMap.set(tweetId, updated);
           updateUI();
@@ -374,7 +403,7 @@
     clickExpandButtons();
     const candidates = getTweetCandidates();
     candidates.forEach(extractTweetData);
-    console.debug(`[Auto-Scraper] Candidates: ${candidates.length} | Tersimpan: ${tweetsMap.size} | Queue Thread: ${queuedThreadUrls.length}`);
+    console.debug(`[Auto-Scraper] Candidates: ${candidates.length} | Tersimpan: ${tweetsMap.size} | Antrean (reply>0): ${queuedThreadUrls.length}`);
   }
 
   function finishScrapingSession(reasonMessage) {
@@ -423,7 +452,7 @@
       currentDrillUrl = '';
       isScraping = false;
       saveState();
-      finishScrapingSession('Seluruh antrean thread dari hasil pencarian selesai dan telah diekspor ke Markdown.');
+      finishScrapingSession('Seluruh thread ber-reply dari hasil pencarian selesai di-scrape dan diekspor ke Markdown.');
       return true;
     }
     return false;
@@ -482,7 +511,7 @@
           if (canDrill && advanceToNextQueuedThread()) {
             return;
           }
-          finishScrapingSession('Proses scrolling selesai dan data siap/telah diekspor ke Markdown.');
+          finishScrapingSession('Proses scrolling selesai dan data telah diekspor ke Markdown.');
         }
       } else {
         noChangeCount = 0;
@@ -585,43 +614,49 @@
   }
 
   async function exportToMarkdown() {
-    scrapeVisibleTweets();
-    if (tweetsMap.size === 0) {
-      alert('Belum ada postingan yang terambil!');
-      return;
-    }
-
-    const mdContent = generateMarkdown();
-    const ctx = getStatusContext();
-    const dateStr = new Date().toISOString().slice(0, 10);
-    const defaultFilename = ctx.isThreadPage
-      ? `x_thread_${ctx.targetHandle || 'user'}_${ctx.targetTweetId}_${dateStr}.md`
-      : `x_archive_${dateStr}.md`;
-
-    if ('showSaveFilePicker' in window) {
-      try {
-        const handle = await window.showSaveFilePicker({
-          suggestedName: defaultFilename,
-          types: [{ description: 'Markdown File', accept: { 'text/markdown': ['.md'] } }]
-        });
-        const writable = await handle.createWritable();
-        await writable.write(mdContent);
-        await writable.close();
+    if (isExporting) return;
+    isExporting = true;
+    try {
+      scrapeVisibleTweets();
+      if (tweetsMap.size === 0) {
+        alert('Belum ada postingan yang terambil!');
         return;
-      } catch (err) {
-        if (err && err.name === 'AbortError') return;
-        console.warn('[Auto-Scraper] File picker tidak tersedia/ditolak, beralih ke download langsung.', err);
       }
-    }
 
-    const blob = new Blob([mdContent], { type: 'text/markdown;charset=utf-8;' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = defaultFilename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+      const mdContent = generateMarkdown();
+      const ctx = getStatusContext();
+      const dateStr = new Date().toISOString().slice(0, 10);
+      const defaultFilename = ctx.isThreadPage
+        ? `x_thread_${ctx.targetHandle || 'user'}_${ctx.targetTweetId}_${dateStr}.md`
+        : `x_archive_${dateStr}.md`;
+
+      if ('showSaveFilePicker' in window) {
+        try {
+          const handle = await window.showSaveFilePicker({
+            suggestedName: defaultFilename,
+            types: [{ description: 'Markdown File', accept: { 'text/markdown': ['.md'] } }]
+          });
+          const writable = await handle.createWritable();
+          await writable.write(mdContent);
+          await writable.close();
+          return;
+        } catch (err) {
+          if (err && err.name === 'AbortError') return;
+          console.warn('[Auto-Scraper] File picker tidak tersedia/ditolak, beralih ke download langsung.', err);
+        }
+      }
+
+      const blob = new Blob([mdContent], { type: 'text/markdown;charset=utf-8;' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = defaultFilename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+    } finally {
+      isExporting = false;
+    }
   }
 
   function initUI() {
@@ -644,7 +679,7 @@
       gap: 8px;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       border: 1px solid #38444d;
-      width: 234px;
+      width: 238px;
     `;
 
     modeBadge = document.createElement('div');
@@ -674,7 +709,7 @@
     const expandToggle = createToggleRow('Auto-klik "Show more"', true);
     expandCheckbox = expandToggle.cb;
 
-    const drillToggle = createToggleRow('Buka thread tiap hasil Search', false);
+    const drillToggle = createToggleRow('Buka thread jika reply > 0', true);
     drillSearchCheckbox = drillToggle.cb;
 
     const autoExportToggle = createToggleRow('Auto-export MD saat selesai', true);
@@ -767,7 +802,7 @@
     if (ctx.isThreadPage || mainThreadCount > 0 || replyCount > 0) {
       statusText.innerText = `Thread: ${mainThreadCount} | Balasan: ${replyCount}`;
     } else if (queuedThreadUrls.length > 0) {
-      statusText.innerText = `Tersimpan: ${tweetsMap.size} | Antrean: ${queuedThreadUrls.length}`;
+      statusText.innerText = `Tersimpan: ${tweetsMap.size} | Antrean (>0): ${queuedThreadUrls.length}`;
     } else {
       statusText.innerText = `Tersimpan: ${tweetsMap.size} tweet`;
     }
@@ -775,7 +810,6 @@
 
   initUI();
 
-  // Jika halaman termuat dan sebelumnya sedang dalam sesi scraping/drill, lanjutkan otomatis
   if (isScraping) {
     setTimeout(() => {
       startAutoScroll(true);
