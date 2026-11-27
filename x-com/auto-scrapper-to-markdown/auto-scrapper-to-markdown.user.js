@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Auto-Scraper to Markdown
 // @namespace    http://tampermonkey.net/
-// @version      1.9
-// @description  Auto scrape search + thread (reply > 0), bangun hierarki reply/sub-reply bertingkat dengan indentation & tag mirip XML ke Markdown.
+// @version      2.0
+// @description  Auto scrape search + thread (reply > 0), bangun nested indentation bertingkat (reply/sub-reply) dengan highlight postingan utama & tag mirip XML ke Markdown.
 // @author       You
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -14,7 +14,7 @@
 (function () {
   'use strict';
 
-  const STORAGE_KEY = 'x_auto_scraper_v19_state';
+  const STORAGE_KEY = 'x_auto_scraper_v20_state';
 
   let isScraping = false;
   let isExporting = false;
@@ -144,8 +144,7 @@
   function extractReplyToHandle(container) {
     const fullText = container.innerText || '';
     const m = fullText.match(/Replying to\s+@([A-Za-z0-9_]+)|Membalas\s+@([A-Za-z0-9_]+)/i);
-    const handle = m ? (m[1] || m[2] || '').toLowerCase() : '';
-    return handle;
+    return m ? (m[1] || m[2] || '').toLowerCase() : '';
   }
 
   function parseCountToNumber(rawVal) {
@@ -392,7 +391,6 @@
         return { parentId: '', replyToHandle: '', depth: 0 };
       }
 
-      // Cari item sebelumnya di halaman thread yang sesuai dengan replyToHandle
       if (replyToHandle) {
         for (let i = allItemsList.length - 1; i >= 0; i--) {
           const cand = allItemsList[i];
@@ -401,18 +399,16 @@
             return {
               parentId: cand.id,
               replyToHandle,
-              depth: Math.min(nextDepth, 6)
+              depth: Math.max(1, nextDepth)
             };
           }
         }
       }
 
-      // Jika thread penulis lanjutan, kaitkan ke main post jika tersedia
       if (handle && handle === ctx.targetHandle && rootId) {
-        return { parentId: rootId, replyToHandle: ctx.targetHandle, depth: 0 };
+        return { parentId: rootId, replyToHandle: ctx.targetHandle, depth: 1 };
       }
 
-      // Default reply pada halaman thread berada di bawah main post (depth 1)
       return {
         parentId: rootId || '',
         replyToHandle: replyToHandle || ctx.targetHandle || '',
@@ -685,23 +681,30 @@
       .replace(/>/g, '&gt;');
   }
 
-  function formatIndentedTweetBlock(item, badgeLabel, depthLevel) {
+  function formatNestedTweetBlock(item, badgeLabel, depthLevel) {
     const depth = Math.max(0, Number(depthLevel) || 0);
+    const isMainPost = item.role === 'main';
     const indent = '  '.repeat(depth);
     const quotePrefix = depth > 0 ? `${indent}> ` : '';
     const levelTag = depth === 0
       ? (badgeLabel || 'POST')
-      : `REPLY L${depth}`;
+      : `NESTED REPLY L${depth}`;
 
     const cleanContent = cleanTweetText(item.content || '');
     const formattedContent = cleanContent
       .split('\n')
       .filter(line => line.trim().length > 0 || line === '')
-      .map(line => `${quotePrefix}${line}`)
+      .map(line => (isMainPost && depth === 0 ? `**${line}**` : `${quotePrefix}${line}`))
       .join('\n\n');
 
     let out = '';
-    out += `${indent}- **${item.author}** \`[${levelTag}]\`${item.timestamp ? ` *(${item.timestamp})*` : ''}`;
+    if (isMainPost && depth === 0) {
+      out += `> **★ POSTINGAN UTAMA (HIGHLIGHT) ★**\n\n`;
+      out += `### **${item.author}** \`[${levelTag}]\`${item.timestamp ? ` ***(${item.timestamp})***` : ''}`;
+    } else {
+      out += `${indent}- **${item.author}** \`[${levelTag}]\`${item.timestamp ? ` *(${item.timestamp})*` : ''}`;
+    }
+
     if (item.replyToHandle) {
       out += ` → *replying to @${item.replyToHandle}*`;
     }
@@ -709,14 +712,19 @@
       out += ` — [Link](${item.url})`;
     }
     out += `\n`;
-    out += `${quotePrefix}> 💬 **Replies:** ${item.replies} | 🔁 **Reposts:** ${item.reposts} | ❤️ **Likes:** ${item.likes} | 📊 **Views:** ${item.views} | 🔖 **Bookmarks:** ${item.bookmarks}\n\n`;
+
+    const metricLine = `💬 **Replies:** ${item.replies} | 🔁 **Reposts:** ${item.reposts} | ❤️ **Likes:** ${item.likes} | 📊 **Views:** ${item.views} | 🔖 **Bookmarks:** ${item.bookmarks}`;
+    out += (isMainPost && depth === 0)
+      ? `> **${metricLine}**\n\n`
+      : `${quotePrefix}> ${metricLine}\n\n`;
+
     if (formattedContent) {
       out += `${formattedContent}\n\n`;
     }
 
-    const xmlTag = depth === 0 ? 'post' : 'reply';
+    const xmlTag = isMainPost ? 'main_post' : (depth === 0 ? 'post' : 'nested_reply');
     out += `${indent}\`\`\`xml\n`;
-    out += `${indent}<${xmlTag} id="${escapeXmlAttr(item.id)}" role="${escapeXmlAttr(item.role)}" depth="${depth}" author="${escapeXmlAttr(item.author)}" handle="${escapeXmlAttr(item.handle)}" parent_id="${escapeXmlAttr(item.parentId || '')}" reply_to="${escapeXmlAttr(item.replyToHandle || '')}" timestamp="${escapeXmlAttr(item.timestamp || '')}" url="${escapeXmlAttr(item.url || '')}">\n`;
+    out += `${indent}<${xmlTag} id="${escapeXmlAttr(item.id)}" role="${escapeXmlAttr(item.role)}" highlight="${isMainPost ? 'true' : 'false'}" depth="${depth}" author="${escapeXmlAttr(item.author)}" handle="${escapeXmlAttr(item.handle)}" parent_id="${escapeXmlAttr(item.parentId || '')}" reply_to="${escapeXmlAttr(item.replyToHandle || '')}" timestamp="${escapeXmlAttr(item.timestamp || '')}" url="${escapeXmlAttr(item.url || '')}">\n`;
     out += `${indent}  <metrics replies="${escapeXmlAttr(item.replies)}" reposts="${escapeXmlAttr(item.reposts)}" likes="${escapeXmlAttr(item.likes)}" views="${escapeXmlAttr(item.views)}" bookmarks="${escapeXmlAttr(item.bookmarks)}" />\n`;
     out += `${indent}  <content>${escapeXmlText(cleanContent)}</content>\n`;
     out += `${indent}</${xmlTag}>\n`;
@@ -733,11 +741,12 @@
       visitedInRender.add(node.id);
 
       const effectiveDepth = Math.max(currentDepth, Number(node.depth) || 0);
-      md += formatIndentedTweetBlock(node, badgeFn(node, effectiveDepth), effectiveDepth);
+      md += formatNestedTweetBlock(node, badgeFn(node, effectiveDepth), effectiveDepth);
 
       const kids = childrenMap.get(node.id) || [];
       for (const child of kids) {
-        walk(child, effectiveDepth + 1);
+        const childDepth = Math.max(effectiveDepth + 1, Number(child.depth) || (effectiveDepth + 1));
+        walk(child, childDepth);
       }
     }
 
@@ -745,12 +754,11 @@
       walk(n, fallbackDepth);
     }
 
-    // Pastikan item yang terikat parentId tertentu tapi belum ter-walk juga tetap tercetak
-    for (const [parentId, kids] of childrenMap.entries()) {
+    for (const [_parentId, kids] of childrenMap.entries()) {
       for (const child of kids) {
         if (!visitedInRender.has(child.id)) {
           const d = Math.max(1, Number(child.depth) || 1);
-          md += formatIndentedTweetBlock(child, badgeFn(child, d), d);
+          md += formatNestedTweetBlock(child, badgeFn(child, d), d);
           visitedInRender.add(child.id);
         }
       }
@@ -786,22 +794,24 @@
         ? mainAndThread.length
         : (mainAndThread.length + otherReplies.length + searchItems.length + timelineItems.length);
 
-      md += `- **Mode:** Single Post / Thread + Hierarki Balasan (Indentation + XML Tags)\n`;
+      md += `- **Mode:** Single Post / Thread + Nested Indentation Replies\n`;
       md += `- **Total Item Diekspor:** ${exportedCount} (Utama & Thread: ${mainAndThread.length}, Balasan/Sentimen: ${otherReplies.length})\n\n---\n\n`;
 
       if (mainAndThread.length > 0) {
-        md += `## Postingan Utama & Rangkaian Thread Penulis\n\n`;
+        md += `## **Postingan Utama & Rangkaian Thread Penulis**\n\n`;
         md += renderTreeNodes(
           mainAndThread,
           childrenMap,
-          (item) => (item.role === 'main' ? 'POSTINGAN UTAMA' : 'THREAD PENULIS'),
+          (item) => (item.role === 'main' ? '★ POSTINGAN UTAMA ★' : 'THREAD PENULIS'),
           0
         );
       }
 
       if (!threadOnly && otherReplies.length > 0) {
-        md += `## Balasan & Sentimen Komentar (Bertingkat)\n\n`;
-        const topLevelReplies = otherReplies.filter(r => !r.parentId || !tweetsMap.has(r.parentId) || tweetsMap.get(r.parentId)?.role === 'main');
+        md += `## Balasan & Sentimen Komentar (Nested Indentation)\n\n`;
+        const topLevelReplies = otherReplies.filter(
+          r => !r.parentId || !tweetsMap.has(r.parentId) || tweetsMap.get(r.parentId)?.role === 'main'
+        );
         const nestedOrOtherReplies = otherReplies.filter(r => !topLevelReplies.includes(r));
 
         md += renderTreeNodes(
