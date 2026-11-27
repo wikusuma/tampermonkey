@@ -1,13 +1,13 @@
 // ==UserScript==
-// @name         Auto-Scraper to Markdown 
+// @name         Auto-Scraper to Markdown
 // @namespace    http://tampermonkey.net/
-// @version      1.2
-// @description  Auto scroll timeline atau thread postingan X, pisahkan postingan utama & thread penulis dari balasan lain, ekstrak metrik, dan simpan sebagai Markdown.
+// @version      1.3
+// @description  Auto scroll timeline, pencarian, atau thread postingan X, pisahkan postingan utama & thread penulis dari balasan lain, ekstrak metrik, dan simpan sebagai Markdown.
 // @author       You
 // @match        https://x.com/*
 // @match        https://twitter.com/*
-// @updateURL    https://github.com/wikusuma/tampermonkey/tree/main/x-com/auto-scrapper-to-markdown/auto-scrapper-to-markdown.user.js
-// @downloadURL  https://github.com/wikusuma/tampermonkey/tree/main/x-com/auto-scrapper-to-markdown/auto-scrapper-to-markdown.user.js
+// @updateURL    https://github.com/wikusuma/tampermonkey/raw/main/x-com/auto-scrapper-to-markdown/auto-scrapper-to-markdown.user.js
+// @downloadURL  https://github.com/wikusuma/tampermonkey/raw/main/x-com/auto-scrapper-to-markdown/auto-scrapper-to-markdown.user.js
 // @grant        none
 // ==/UserScript==
 
@@ -21,6 +21,15 @@
   let noChangeCount = 0;
   let lastHeight = 0;
   let lastUrl = location.href;
+
+  // Referensi elemen UI (diisi saat panel dibuat)
+  let modeBadge = null;
+  let statusText = null;
+  let threadOnlyCheckbox = null;
+  let expandCheckbox = null;
+  let startBtn = null;
+  let exportBtn = null;
+  let clearBtn = null;
 
   // --- Helper URL & Identitas Tweet ---
   function getStatusContext() {
@@ -43,85 +52,185 @@
   function extractHandleFromUrlOrAuthor(url, authorText) {
     const urlMatch = (url || '').match(/x\.com\/([^/]+)\/status\/\d+|twitter\.com\/([^/]+)\/status\/\d+/i);
     if (urlMatch) {
-      return (urlMatch[1] || urlMatch[2] || '').toLowerCase();
+      const candidate = (urlMatch[1] || urlMatch[2] || '').toLowerCase();
+      if (candidate && candidate !== 'i' && candidate !== 'web') {
+        return candidate;
+      }
     }
     const handleMatch = (authorText || '').match(/@([A-Za-z0-9_]+)/);
     return handleMatch ? handleMatch[1].toLowerCase() : '';
   }
 
   // --- Helper Metrik Engagement ---
-  function getMetricValue(article, testId) {
-    const btn = article.querySelector(`button[data-testid="${testId}"], a[data-testid="${testId}"]`);
+  function getMetricValue(container, testId) {
+    const btn = container.querySelector(`button[data-testid="${testId}"], a[data-testid="${testId}"]`);
     if (!btn) return '0';
 
     const textSpan = btn.querySelector('span[data-testid="app-text-transition-container"]') || btn.querySelector('span');
-    const textVal = textSpan ? textSpan.innerText.trim() : btn.innerText.trim();
+    const textVal = textSpan ? (textSpan.innerText || '').trim() : (btn.innerText || '').trim();
+    if (textVal) return textVal;
 
-    if (!textVal && btn.getAttribute('aria-label')) {
-      const match = btn.getAttribute('aria-label').match(/\d+[\d,\.]*[KMB]?/i);
-      return match ? match[0] : '0';
-    }
-    return textVal || '0';
+    const aria = btn.getAttribute('aria-label') || '';
+    const match = aria.match(/\d[\d,\.]*[KMB]?/i);
+    return match ? match[0] : '0';
+  }
+
+  function getViewsValue(container) {
+    const viewsEl = container.querySelector('a[href*="/analytics"], a[href*="/status/"][aria-label*="views" i], a[aria-label*="views" i], a[aria-label*="tayangan" i]');
+    if (!viewsEl) return '0';
+
+    const viewsSpan = viewsEl.querySelector('span[data-testid="app-text-transition-container"]') || viewsEl.querySelector('span');
+    const spanText = viewsSpan ? (viewsSpan.innerText || '').trim() : '';
+    if (spanText) return spanText;
+
+    const aria = viewsEl.getAttribute('aria-label') || '';
+    const match = aria.match(/\d[\d,\.]*[KMB]?/i);
+    return match ? match[0] : ((viewsEl.innerText || '').trim() || '0');
   }
 
   // --- Klik Tombol "Show more" Secara Selektif ---
   function clickExpandButtons() {
-    if (!expandCheckbox.checked) return;
+    if (!expandCheckbox || !expandCheckbox.checked) return;
     const now = Date.now();
     if (now - expandTimer < 2200) return;
     expandTimer = now;
 
+    const triggers = new Set([
+      'show more replies',
+      'show probable spam',
+      'show additional replies',
+      'show this thread',
+      'tampilkan balasan lainnya',
+      'tampilkan utas ini',
+      'tampilkan lebih banyak balasan'
+    ]);
+
     const candidates = document.querySelectorAll('div[role="button"], button');
     for (const el of candidates) {
       const text = (el.innerText || '').trim().toLowerCase();
-      if (
-        text === 'show more replies' ||
-        text === 'show probable spam' ||
-        text === 'show additional replies' ||
-        text === 'show this thread' ||
-        text === 'tampilkan balasan lainnya' ||
-        text === 'tampilkan utas ini'
-      ) {
-        el.click();
+      if (triggers.has(text)) {
+        try {
+          el.click();
+        } catch (err) {
+          console.debug('[Auto-Scraper] Gagal klik tombol expand:', err);
+        }
         break;
       }
     }
   }
 
-  // --- Ekstraksi Data Per Tweet ---
-  function extractTweetData(article) {
+  // --- Pencarian Elemen Kandidat Tweet di DOM X ---
+  function getTweetCandidates() {
+    // 1. Selector standar X
+    const articles = Array.from(document.querySelectorAll('article[data-testid="tweet"], article'));
+    if (articles.length > 0) {
+      return Array.from(new Set(articles));
+    }
+
+    // 2. Fallback ke cellInnerDiv / container yang memuat link /status/ dan teks
+    const cells = Array.from(document.querySelectorAll('[data-testid="cellInnerDiv"]'));
+    const fromCells = cells.filter(cell => {
+      if (cell.closest('[data-testid="tweet"]') || cell.closest('article')) return false;
+      return Boolean(cell.querySelector('a[href*="/status/"]') || cell.querySelector('[data-testid="tweetText"]'));
+    });
+    if (fromCells.length > 0) {
+      return Array.from(new Set(fromCells));
+    }
+
+    // 3. Fallback terakhir dari tautan /status/
+    const statusLinks = Array.from(document.querySelectorAll('a[href*="/status/"]'));
+    const wrappers = [];
+    for (const link of statusLinks) {
+      const container = link.closest('article, [data-testid="cellInnerDiv"]') || link.parentElement?.parentElement?.parentElement;
+      if (container && !wrappers.includes(container)) {
+        wrappers.push(container);
+      }
+    }
+    return wrappers;
+  }
+
+  // --- Ekstraksi Teks & Metadata Tweet ---
+  function extractTweetText(container) {
+    const tweetTextEl = container.querySelector('div[data-testid="tweetText"], [data-testid="tweetText"]');
+    if (tweetTextEl && (tweetTextEl.innerText || '').trim()) {
+      return tweetTextEl.innerText.trim();
+    }
+
+    // Fallback: ambil elemen teks berbahasa/berisi konten yang bukan bagian User-Name atau waktu
+    const textBlocks = Array.from(container.querySelectorAll('div[lang], span[lang]')).filter(el => {
+      if (el.closest('[data-testid="User-Name"]')) return false;
+      if (el.closest('time')) return false;
+      return (el.innerText || '').trim().length > 0;
+    });
+
+    if (textBlocks.length > 0) {
+      // Utamakan elemen terluar/terpanjang agar tidak terduplikasi
+      const sorted = textBlocks
+        .map(el => el.innerText.trim())
+        .filter(Boolean)
+        .sort((a, b) => b.length - a.length);
+      return sorted[0] || '';
+    }
+
+    return '';
+  }
+
+  function extractTweetUrlAndId(container) {
+    const timeEl = container.querySelector('time');
+    const timeLink = timeEl ? timeEl.closest('a[href*="/status/"]') : null;
+    const anyStatusLink = timeLink || container.querySelector('a[href*="/status/"]');
+    const tweetUrl = anyStatusLink ? anyStatusLink.href : '';
+    const statusId = extractTweetIdFromUrl(tweetUrl);
+    return { timeEl, tweetUrl, statusId };
+  }
+
+  function extractAuthorAndHandle(container, tweetUrl) {
+    const userNames = container.querySelector('div[data-testid="User-Name"], [data-testid="User-Name"]');
+    const rawUserText = userNames ? (userNames.innerText || '') : '';
+    const authorLines = rawUserText
+      .split('\n')
+      .map(s => s.trim())
+      .filter(s => s && s !== '·' && !s.startsWith('@'));
+
+    let author = authorLines.length ? authorLines.slice(0, 2).join(' ') : '';
+    let handle = extractHandleFromUrlOrAuthor(tweetUrl, rawUserText);
+
+    if (!handle && rawUserText) {
+      const m = rawUserText.match(/@([A-Za-z0-9_]+)/);
+      if (m) handle = m[1].toLowerCase();
+    }
+
+    if (!author && handle) {
+      author = `@${handle}`;
+    } else if (!author) {
+      author = 'Unknown';
+    }
+
+    return { author, handle };
+  }
+
+  function extractTweetData(container) {
     try {
       const ctx = getStatusContext();
-      const timeEl = article.querySelector('time');
-      const linkEl = timeEl ? timeEl.closest('a') : null;
-      const tweetUrl = linkEl ? linkEl.href : '';
-      const statusId = extractTweetIdFromUrl(tweetUrl);
-
-      const fallbackId = `${article.innerText.trim().slice(0, 80)}|${ctx.targetTweetId || 'feed'}`;
-      const tweetId = statusId ? `id:${statusId}` : `fb:${fallbackId}`;
-
-      const userNames = article.querySelector('div[data-testid="User-Name"]');
-      const authorLines = userNames ? userNames.innerText.split('\n').map(s => s.trim()).filter(Boolean) : [];
-      const author = authorLines.length ? authorLines.slice(0, 2).join(' ') : 'Unknown';
-      const handle = extractHandleFromUrlOrAuthor(tweetUrl, userNames ? userNames.innerText : '');
-      const timestamp = timeEl ? (timeEl.getAttribute('datetime') || timeEl.innerText.trim()) : '';
-
-      const tweetTextEl = article.querySelector('div[data-testid="tweetText"]');
-      const tweetText = tweetTextEl ? tweetTextEl.innerText.trim() : '';
+      const { timeEl, tweetUrl, statusId } = extractTweetUrlAndId(container);
+      const { author, handle } = extractAuthorAndHandle(container, tweetUrl);
+      const tweetText = extractTweetText(container);
 
       if (!tweetText && !tweetUrl) return;
 
-      const replies = getMetricValue(article, 'reply');
-      const reposts = getMetricValue(article, 'retweet');
-      const likes = getMetricValue(article, 'like');
-      const bookmarks = getMetricValue(article, 'bookmark');
+      const rawTextSnippet = (container.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 100);
+      const fallbackId = `${handle || 'unknown'}|${rawTextSnippet}|${ctx.targetTweetId || 'feed'}`;
+      const tweetId = statusId ? `id:${statusId}` : `fb:${fallbackId}`;
 
-      const viewsEl = article.querySelector('a[href*="/analytics"], a[href*="/status/"][aria-label*="views"]');
-      let views = '0';
-      if (viewsEl) {
-        const viewsSpan = viewsEl.querySelector('span[data-testid="app-text-transition-container"]') || viewsEl.querySelector('span');
-        views = viewsSpan ? viewsSpan.innerText.trim() : (viewsEl.innerText.trim() || '0');
-      }
+      const timestamp = timeEl
+        ? (timeEl.getAttribute('datetime') || (timeEl.innerText || '').trim())
+        : '';
+
+      const replies = getMetricValue(container, 'reply');
+      const reposts = getMetricValue(container, 'retweet');
+      const likes = getMetricValue(container, 'like');
+      const bookmarks = getMetricValue(container, 'bookmark');
+      const views = getViewsValue(container);
 
       let role = 'timeline';
       if (ctx.isThreadPage) {
@@ -155,32 +264,47 @@
         updateUI();
       } else {
         const prev = tweetsMap.get(tweetId);
-        // Perbarui role jika konteks halaman berubah ke thread spesifik
-        if (prev.role === 'timeline' && role !== 'timeline') {
-          tweetsMap.set(tweetId, { ...prev, role });
+        const updated = {
+          ...prev,
+          role: (prev.role === 'timeline' && role !== 'timeline') ? role : prev.role,
+          content: prev.content || payload.content,
+          url: prev.url || payload.url,
+          timestamp: prev.timestamp || payload.timestamp
+        };
+        if (
+          updated.role !== prev.role ||
+          updated.content !== prev.content ||
+          updated.url !== prev.url ||
+          updated.timestamp !== prev.timestamp
+        ) {
+          tweetsMap.set(tweetId, updated);
           updateUI();
         }
       }
     } catch (err) {
-      console.error('Gagal mengekstrak tweet:', err);
+      console.error('[Auto-Scraper] Gagal mengekstrak tweet:', err);
     }
   }
 
   function scrapeVisibleTweets() {
     clickExpandButtons();
-    const articles = document.querySelectorAll('article[data-testid="tweet"]');
-    articles.forEach(extractTweetData);
+    const candidates = getTweetCandidates();
+    candidates.forEach(extractTweetData);
+    console.debug(`[Auto-Scraper] Candidates: ${candidates.length} | Tersimpan: ${tweetsMap.size}`);
   }
 
   // --- Kontrol Auto-Scroll ---
   function startAutoScroll() {
     if (isScraping) return;
     isScraping = true;
-    startBtn.innerText = 'Stop Scraping';
-    startBtn.style.backgroundColor = '#dc2626';
+
+    if (startBtn) {
+      startBtn.innerText = 'Stop Scraping';
+      startBtn.style.backgroundColor = '#dc2626';
+    }
 
     scrapeVisibleTweets();
-    lastHeight = document.documentElement.scrollHeight;
+    lastHeight = Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0);
     noChangeCount = 0;
 
     scrollInterval = setInterval(() => {
@@ -189,40 +313,52 @@
       if (location.href !== lastUrl) {
         lastUrl = location.href;
         noChangeCount = 0;
+        updateUI();
       }
 
       scrapeVisibleTweets();
-      window.scrollBy(0, window.innerHeight * 0.85);
 
-      const currentHeight = document.documentElement.scrollHeight;
+      const step = Math.round(window.innerHeight * 0.72);
+      window.scrollBy({ top: step, behavior: 'instant' });
+
+      const currentHeight = Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0);
       if (currentHeight === lastHeight) {
         noChangeCount++;
+        // Jalankan satu kali scraping ekstra sebelum berhenti
+        scrapeVisibleTweets();
         if (noChangeCount >= 12) {
           stopAutoScroll();
-          alert('Sudah mencapai bagian paling bawah atau limit pemuatan halaman tercapai.');
+          alert('Sudah mencapai bagian paling bawah atau limit feed tercapai.');
         }
       } else {
         noChangeCount = 0;
         lastHeight = currentHeight;
       }
-    }, 1200);
+    }, 1500);
   }
 
   function stopAutoScroll() {
     isScraping = false;
-    clearInterval(scrollInterval);
-    startBtn.innerText = 'Start Auto-Scroll';
-    startBtn.style.backgroundColor = '#1d9bf0';
+    if (scrollInterval) {
+      clearInterval(scrollInterval);
+      scrollInterval = null;
+    }
+    scrapeVisibleTweets();
+
+    if (startBtn) {
+      startBtn.innerText = 'Start Auto-Scroll';
+      startBtn.style.backgroundColor = '#1d9bf0';
+    }
   }
 
   // --- Format Markdown ---
   function formatTweetBlock(num, item, badgeLabel) {
-    let block = `### ${num}. ${item.author}${badgeLabel ? ` [${badgeLabel}]` : ''} (${item.timestamp})\n`;
+    let block = `### ${num}. ${item.author}${badgeLabel ? ` [${badgeLabel}]` : ''}${item.timestamp ? ` (${item.timestamp})` : ''}\n`;
     if (item.url) {
       block += `**Link:** [Lihat Tweet](${item.url})\n\n`;
     }
     block += `> 💬 **Replies:** ${item.replies} | 🔁 **Reposts:** ${item.reposts} | ❤️ **Likes:** ${item.likes} | 📊 **Views:** ${item.views} | 🔖 **Bookmarks:** ${item.bookmarks}\n\n`;
-    block += `${item.content.replace(/\n/g, '\n\n')}\n\n`;
+    block += `${(item.content || '').replace(/\n/g, '\n\n')}\n\n`;
     block += `---\n\n`;
     return block;
   }
@@ -230,7 +366,7 @@
   function generateMarkdown() {
     const ctx = getStatusContext();
     const allItems = Array.from(tweetsMap.values());
-    const threadOnly = threadOnlyCheckbox.checked;
+    const threadOnly = Boolean(threadOnlyCheckbox && threadOnlyCheckbox.checked);
 
     const mainAndThread = allItems.filter(i => i.role === 'main' || i.role === 'thread');
     const otherReplies = allItems.filter(i => i.role === 'reply');
@@ -241,7 +377,10 @@
     md += `- **URL Sumber:** ${location.href}\n`;
 
     if (ctx.isThreadPage || mainAndThread.length > 0 || otherReplies.length > 0) {
-      const exportedCount = threadOnly ? mainAndThread.length : (mainAndThread.length + otherReplies.length + timelineItems.length);
+      const exportedCount = threadOnly
+        ? mainAndThread.length
+        : (mainAndThread.length + otherReplies.length + timelineItems.length);
+
       md += `- **Mode:** Thread / Postingan Detail\n`;
       md += `- **Total Item Diekspor:** ${exportedCount} (Utama & Thread: ${mainAndThread.length}, Balasan Lain: ${otherReplies.length})\n\n---\n\n`;
 
@@ -292,7 +431,7 @@
     const ctx = getStatusContext();
     const dateStr = new Date().toISOString().slice(0, 10);
     const defaultFilename = ctx.isThreadPage
-      ? `x_thread_${ctx.targetHandle}_${ctx.targetTweetId}_${dateStr}.md`
+      ? `x_thread_${ctx.targetHandle || 'user'}_${ctx.targetTweetId}_${dateStr}.md`
       : `x_archive_${dateStr}.md`;
 
     if ('showSaveFilePicker' in window) {
@@ -306,8 +445,8 @@
         await writable.close();
         return;
       } catch (err) {
-        if (err.name === 'AbortError') return;
-        console.warn('File picker dibatalkan atau tidak diizinkan, beralih ke download langsung.', err);
+        if (err && err.name === 'AbortError') return;
+        console.warn('[Auto-Scraper] File picker tidak tersedia/ditolak, beralih ke download langsung.', err);
       }
     }
 
@@ -318,102 +457,123 @@
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    URL.revokeObjectURL(link.href);
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
   }
 
   // --- Floating UI Widget ---
-  const panel = document.createElement('div');
-  panel.style.cssText = `
-    position: fixed;
-    bottom: 24px;
-    right: 24px;
-    z-index: 999999;
-    background: #15202b;
-    color: #fff;
-    padding: 14px;
-    border-radius: 12px;
-    box-shadow: 0 4px 15px rgba(0,0,0,0.4);
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    border: 1px solid #38444d;
-    width: 196px;
-  `;
+  function initUI() {
+    if (!document.body || document.getElementById('x-auto-scraper-panel')) return;
 
-  const modeBadge = document.createElement('div');
-  modeBadge.style.cssText = 'font-size: 11px; text-align: center; font-weight: bold; color: #1d9bf0;';
+    const panel = document.createElement('div');
+    panel.id = 'x-auto-scraper-panel';
+    panel.style.cssText = `
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      z-index: 999999;
+      background: #15202b;
+      color: #fff;
+      padding: 14px;
+      border-radius: 12px;
+      box-shadow: 0 4px 15px rgba(0, 0, 0, 0.45);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      border: 1px solid #38444d;
+      width: 204px;
+    `;
 
-  const statusText = document.createElement('div');
-  statusText.innerText = 'Tersimpan: 0 tweet';
-  statusText.style.cssText = 'font-size: 12px; text-align: center; color: #8899a6;';
+    modeBadge = document.createElement('div');
+    modeBadge.style.cssText = 'font-size: 11px; text-align: center; font-weight: bold; color: #1d9bf0;';
 
-  function createToggleRow(labelText, defaultChecked) {
-    const row = document.createElement('label');
-    row.style.cssText = 'display: flex; align-items: center; gap: 6px; font-size: 11px; color: #cfd9de; cursor: pointer; user-select: none;';
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.checked = defaultChecked;
-    const span = document.createElement('span');
-    span.innerText = labelText;
-    row.appendChild(cb);
-    row.appendChild(span);
-    return { row, cb };
+    statusText = document.createElement('div');
+    statusText.innerText = 'Tersimpan: 0 tweet';
+    statusText.style.cssText = 'font-size: 12px; text-align: center; color: #8899a6;';
+
+    function createToggleRow(labelText, defaultChecked) {
+      const row = document.createElement('label');
+      row.style.cssText = 'display: flex; align-items: center; gap: 6px; font-size: 11px; color: #cfd9de; cursor: pointer; user-select: none;';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = defaultChecked;
+      const span = document.createElement('span');
+      span.innerText = labelText;
+      row.appendChild(cb);
+      row.appendChild(span);
+      return { row, cb };
+    }
+
+    const threadOnlyToggle = createToggleRow('Thread penulis saja (saat di status)', false);
+    threadOnlyCheckbox = threadOnlyToggle.cb;
+
+    const expandToggle = createToggleRow('Auto-klik "Show more"', false);
+    expandCheckbox = expandToggle.cb;
+
+    startBtn = document.createElement('button');
+    startBtn.innerText = 'Start Auto-Scroll';
+    startBtn.style.cssText = `
+      background-color: #1d9bf0;
+      color: white;
+      border: none;
+      padding: 8px 12px;
+      border-radius: 9999px;
+      font-weight: bold;
+      font-size: 13px;
+      cursor: pointer;
+    `;
+    startBtn.onclick = () => {
+      if (isScraping) stopAutoScroll();
+      else startAutoScroll();
+    };
+
+    exportBtn = document.createElement('button');
+    exportBtn.innerText = 'Export Markdown';
+    exportBtn.style.cssText = `
+      background-color: #00ba7c;
+      color: white;
+      border: none;
+      padding: 8px 12px;
+      border-radius: 9999px;
+      font-weight: bold;
+      font-size: 13px;
+      cursor: pointer;
+    `;
+    exportBtn.onclick = exportToMarkdown;
+
+    clearBtn = document.createElement('button');
+    clearBtn.innerText = 'Reset Data';
+    clearBtn.style.cssText = `
+      background-color: transparent;
+      color: #8899a6;
+      border: 1px solid #38444d;
+      padding: 5px 10px;
+      border-radius: 9999px;
+      font-size: 11px;
+      cursor: pointer;
+    `;
+    clearBtn.onclick = () => {
+      tweetsMap.clear();
+      updateUI();
+    };
+
+    panel.appendChild(modeBadge);
+    panel.appendChild(statusText);
+    panel.appendChild(threadOnlyToggle.row);
+    panel.appendChild(expandToggle.row);
+    panel.appendChild(startBtn);
+    panel.appendChild(exportBtn);
+    panel.appendChild(clearBtn);
+    document.body.appendChild(panel);
+
+    updateUI();
   }
 
-  const { row: threadOnlyRow, cb: threadOnlyCheckbox } = createToggleRow('Thread penulis saja (saat di status)', false);
-  const { row: expandRow, cb: expandCheckbox } = createToggleRow('Auto-klik "Show more"', false);
-
-  const startBtn = document.createElement('button');
-  startBtn.innerText = 'Start Auto-Scroll';
-  startBtn.style.cssText = `
-    background-color: #1d9bf0;
-    color: white;
-    border: none;
-    padding: 8px 12px;
-    border-radius: 9999px;
-    font-weight: bold;
-    font-size: 13px;
-    cursor: pointer;
-  `;
-  startBtn.onclick = () => {
-    if (isScraping) stopAutoScroll();
-    else startAutoScroll();
-  };
-
-  const exportBtn = document.createElement('button');
-  exportBtn.innerText = 'Export Markdown';
-  exportBtn.style.cssText = `
-    background-color: #00ba7c;
-    color: white;
-    border: none;
-    padding: 8px 12px;
-    border-radius: 9999px;
-    font-weight: bold;
-    font-size: 13px;
-    cursor: pointer;
-  `;
-  exportBtn.onclick = exportToMarkdown;
-
-  const clearBtn = document.createElement('button');
-  clearBtn.innerText = 'Reset Data';
-  clearBtn.style.cssText = `
-    background-color: transparent;
-    color: #8899a6;
-    border: 1px solid #38444d;
-    padding: 5px 10px;
-    border-radius: 9999px;
-    font-size: 11px;
-    cursor: pointer;
-  `;
-  clearBtn.onclick = () => {
-    tweetsMap.clear();
-    updateUI();
-  };
-
   function updateUI() {
+    if (!modeBadge || !statusText) return;
+
     const ctx = getStatusContext();
-    modeBadge.innerText = ctx.isThreadPage ? `Mode: Thread (@${ctx.targetHandle})` : 'Mode: Timeline';
+    modeBadge.innerText = ctx.isThreadPage ? `Mode: Thread (@${ctx.targetHandle})` : 'Mode: Timeline / Search';
 
     const items = Array.from(tweetsMap.values());
     const mainThreadCount = items.filter(i => i.role === 'main' || i.role === 'thread').length;
@@ -426,20 +586,16 @@
     }
   }
 
+  initUI();
+
+  // Pantau navigasi SPA di X & pastikan panel tetap ada bila DOM di-reset
   setInterval(() => {
+    if (!document.getElementById('x-auto-scraper-panel')) {
+      initUI();
+    }
     if (location.href !== lastUrl) {
       lastUrl = location.href;
       updateUI();
     }
   }, 800);
-
-  updateUI();
-  panel.appendChild(modeBadge);
-  panel.appendChild(statusText);
-  panel.appendChild(threadOnlyRow);
-  panel.appendChild(expandRow);
-  panel.appendChild(startBtn);
-  panel.appendChild(exportBtn);
-  panel.appendChild(clearBtn);
-  document.body.appendChild(panel);
 })();
