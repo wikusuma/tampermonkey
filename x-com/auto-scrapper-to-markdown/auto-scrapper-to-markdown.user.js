@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Auto-Scraper to Markdown
 // @namespace    http://tampermonkey.net/
-// @version      1.5
-// @description  Auto scrape search + thread lanjutan, atau auto-scroll satu postingan/thread penuh beserta sentimen balasannya ke Markdown.
+// @version      1.6
+// @description  Auto scrape search + thread lanjutan dengan state persisten lintas navigasi, atau auto-scroll satu postingan/thread penuh beserta sentimen balasannya ke Markdown.
 // @author       You
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -13,6 +13,8 @@
 
 (function () {
   'use strict';
+
+  const STORAGE_KEY = 'x_auto_scraper_v16_state';
 
   let isScraping = false;
   let tweetsMap = new Map();
@@ -28,15 +30,82 @@
   let searchOriginUrl = '';
   let currentDrillUrl = '';
   let maxSearchThreads = 15;
+  let autoExportOnFinish = true;
 
   let modeBadge = null;
   let statusText = null;
   let threadOnlyCheckbox = null;
   let expandCheckbox = null;
   let drillSearchCheckbox = null;
+  let autoExportCheckbox = null;
   let startBtn = null;
   let exportBtn = null;
   let clearBtn = null;
+
+  function saveState() {
+    try {
+      const payload = {
+        isScraping,
+        tweets: Array.from(tweetsMap.entries()),
+        queuedThreadUrls,
+        visitedThreadIds: Array.from(visitedThreadIds),
+        searchOriginUrl,
+        currentDrillUrl,
+        maxSearchThreads,
+        threadOnly: Boolean(threadOnlyCheckbox && threadOnlyCheckbox.checked),
+        expandMore: Boolean(expandCheckbox && expandCheckbox.checked),
+        drillSearch: Boolean(drillSearchCheckbox && drillSearchCheckbox.checked),
+        autoExport: Boolean(autoExportCheckbox ? autoExportCheckbox.checked : autoExportOnFinish)
+      };
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    } catch (err) {
+      console.debug('[Auto-Scraper] Gagal menyimpan state ke sessionStorage:', err);
+    }
+  }
+
+  function loadState() {
+    try {
+      const raw = sessionStorage.getItem(STORAGE_KEY);
+      if (!raw) return false;
+      const data = JSON.parse(raw);
+
+      if (Array.isArray(data.tweets)) {
+        tweetsMap = new Map(data.tweets);
+      }
+      if (Array.isArray(data.queuedThreadUrls)) {
+        queuedThreadUrls = data.queuedThreadUrls;
+      }
+      if (Array.isArray(data.visitedThreadIds)) {
+        visitedThreadIds = new Set(data.visitedThreadIds);
+      }
+      searchOriginUrl = data.searchOriginUrl || '';
+      currentDrillUrl = data.currentDrillUrl || '';
+      if (typeof data.maxSearchThreads === 'number' && data.maxSearchThreads > 0) {
+        maxSearchThreads = data.maxSearchThreads;
+      }
+      if (typeof data.autoExport === 'boolean') {
+        autoExportOnFinish = data.autoExport;
+      }
+      isScraping = Boolean(data.isScraping);
+
+      if (threadOnlyCheckbox && typeof data.threadOnly === 'boolean') {
+        threadOnlyCheckbox.checked = data.threadOnly;
+      }
+      if (expandCheckbox && typeof data.expandMore === 'boolean') {
+        expandCheckbox.checked = data.expandMore;
+      }
+      if (drillSearchCheckbox && typeof data.drillSearch === 'boolean') {
+        drillSearchCheckbox.checked = data.drillSearch;
+      }
+      if (autoExportCheckbox && typeof data.autoExport === 'boolean') {
+        autoExportCheckbox.checked = data.autoExport;
+      }
+      return true;
+    } catch (err) {
+      console.debug('[Auto-Scraper] Gagal memuat state dari sessionStorage:', err);
+      return false;
+    }
+  }
 
   function isSearchPage() {
     return location.pathname.startsWith('/search');
@@ -275,6 +344,7 @@
       if (!tweetsMap.has(tweetId)) {
         tweetsMap.set(tweetId, payload);
         updateUI();
+        saveState();
       } else {
         const prev = tweetsMap.get(tweetId);
         const updated = {
@@ -292,6 +362,7 @@
         ) {
           tweetsMap.set(tweetId, updated);
           updateUI();
+          saveState();
         }
       }
     } catch (err) {
@@ -306,6 +377,30 @@
     console.debug(`[Auto-Scraper] Candidates: ${candidates.length} | Tersimpan: ${tweetsMap.size} | Queue Thread: ${queuedThreadUrls.length}`);
   }
 
+  function finishScrapingSession(reasonMessage) {
+    isScraping = false;
+    if (scrollInterval) {
+      clearInterval(scrollInterval);
+      scrollInterval = null;
+    }
+    scrapeVisibleTweets();
+    saveState();
+
+    if (startBtn) {
+      startBtn.innerText = 'Start Auto-Scroll';
+      startBtn.style.backgroundColor = '#1d9bf0';
+    }
+
+    const shouldAutoExport = Boolean(autoExportCheckbox ? autoExportCheckbox.checked : autoExportOnFinish);
+    if (shouldAutoExport && tweetsMap.size > 0) {
+      exportToMarkdown().finally(() => {
+        if (reasonMessage) alert(reasonMessage);
+      });
+    } else if (reasonMessage) {
+      alert(reasonMessage);
+    }
+  }
+
   function advanceToNextQueuedThread() {
     while (queuedThreadUrls.length > 0) {
       const nextUrl = queuedThreadUrls.shift();
@@ -314,8 +409,9 @@
 
       visitedThreadIds.add(nextId);
       currentDrillUrl = nextUrl;
-      noChangeCount = 0;
-      lastHeight = 0;
+      isScraping = true;
+      saveState();
+
       window.scrollTo({ top: 0, behavior: 'instant' });
       location.href = nextUrl;
       return true;
@@ -325,21 +421,29 @@
       const origin = searchOriginUrl;
       searchOriginUrl = '';
       currentDrillUrl = '';
-      location.href = origin;
+      isScraping = false;
+      saveState();
+      finishScrapingSession('Seluruh antrean thread dari hasil pencarian selesai dan telah diekspor ke Markdown.');
+      return true;
     }
     return false;
   }
 
-  function startAutoScroll() {
-    if (isScraping) return;
+  function startAutoScroll(isResume = false) {
+    if (scrollInterval) {
+      clearInterval(scrollInterval);
+      scrollInterval = null;
+    }
     isScraping = true;
 
-    if (isSearchPage() && drillSearchCheckbox && drillSearchCheckbox.checked) {
+    if (!isResume && isSearchPage() && drillSearchCheckbox && drillSearchCheckbox.checked) {
       searchOriginUrl = location.href;
       if (expandCheckbox) expandCheckbox.checked = true;
     } else if (getStatusContext().isThreadPage) {
       if (expandCheckbox) expandCheckbox.checked = true;
     }
+
+    saveState();
 
     if (startBtn) {
       startBtn.innerText = 'Stop Scraping';
@@ -373,13 +477,12 @@
       if (currentHeight === lastHeight) {
         noChangeCount++;
         scrapeVisibleTweets();
-        if (noChangeCount >= 10) {
+        if (noChangeCount >= 8) {
           const canDrill = isSearchPage() && drillSearchCheckbox && drillSearchCheckbox.checked;
           if (canDrill && advanceToNextQueuedThread()) {
             return;
           }
-          stopAutoScroll();
-          alert('Sudah mencapai bagian paling bawah atau seluruh antrean thread selesai.');
+          finishScrapingSession('Proses scrolling selesai dan data siap/telah diekspor ke Markdown.');
         }
       } else {
         noChangeCount = 0;
@@ -395,6 +498,7 @@
       scrollInterval = null;
     }
     scrapeVisibleTweets();
+    saveState();
 
     if (startBtn) {
       startBtn.innerText = 'Start Auto-Scroll';
@@ -540,7 +644,7 @@
       gap: 8px;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       border: 1px solid #38444d;
-      width: 224px;
+      width: 234px;
     `;
 
     modeBadge = document.createElement('div');
@@ -556,6 +660,7 @@
       const cb = document.createElement('input');
       cb.type = 'checkbox';
       cb.checked = defaultChecked;
+      cb.addEventListener('change', saveState);
       const span = document.createElement('span');
       span.innerText = labelText;
       row.appendChild(cb);
@@ -572,6 +677,9 @@
     const drillToggle = createToggleRow('Buka thread tiap hasil Search', false);
     drillSearchCheckbox = drillToggle.cb;
 
+    const autoExportToggle = createToggleRow('Auto-export MD saat selesai', true);
+    autoExportCheckbox = autoExportToggle.cb;
+
     startBtn = document.createElement('button');
     startBtn.innerText = 'Start Auto-Scroll';
     startBtn.style.cssText = `
@@ -586,7 +694,7 @@
     `;
     startBtn.onclick = () => {
       if (isScraping) stopAutoScroll();
-      else startAutoScroll();
+      else startAutoScroll(false);
     };
 
     exportBtn = document.createElement('button');
@@ -615,11 +723,13 @@
       cursor: pointer;
     `;
     clearBtn.onclick = () => {
+      stopAutoScroll();
       tweetsMap.clear();
       queuedThreadUrls = [];
       visitedThreadIds.clear();
       searchOriginUrl = '';
       currentDrillUrl = '';
+      sessionStorage.removeItem(STORAGE_KEY);
       updateUI();
     };
 
@@ -628,11 +738,13 @@
     panel.appendChild(threadOnlyToggle.row);
     panel.appendChild(expandToggle.row);
     panel.appendChild(drillToggle.row);
+    panel.appendChild(autoExportToggle.row);
     panel.appendChild(startBtn);
     panel.appendChild(exportBtn);
     panel.appendChild(clearBtn);
     document.body.appendChild(panel);
 
+    loadState();
     updateUI();
   }
 
@@ -662,6 +774,13 @@
   }
 
   initUI();
+
+  // Jika halaman termuat dan sebelumnya sedang dalam sesi scraping/drill, lanjutkan otomatis
+  if (isScraping) {
+    setTimeout(() => {
+      startAutoScroll(true);
+    }, 1200);
+  }
 
   setInterval(() => {
     if (!document.getElementById('x-auto-scraper-panel')) {
