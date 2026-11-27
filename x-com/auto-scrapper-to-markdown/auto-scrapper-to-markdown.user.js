@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Auto-Scraper to Markdown
 // @namespace    http://tampermonkey.net/
-// @version      1.3
-// @description  Auto scroll timeline, pencarian, atau thread postingan X, pisahkan postingan utama & thread penulis dari balasan lain, ekstrak metrik, dan simpan sebagai Markdown.
+// @version      1.4
+// @description  Auto scroll timeline, pencarian, atau thread postingan X, ekstrak postingan & metrik, dan simpan sebagai Markdown.
 // @author       You
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -22,7 +22,6 @@
   let lastHeight = 0;
   let lastUrl = location.href;
 
-  // Referensi elemen UI (diisi saat panel dibuat)
   let modeBadge = null;
   let statusText = null;
   let threadOnlyCheckbox = null;
@@ -31,7 +30,6 @@
   let exportBtn = null;
   let clearBtn = null;
 
-  // --- Helper URL & Identitas Tweet ---
   function getStatusContext() {
     const match = location.pathname.match(/^\/([^/]+)\/status\/(\d+)/);
     if (!match) {
@@ -61,7 +59,6 @@
     return handleMatch ? handleMatch[1].toLowerCase() : '';
   }
 
-  // --- Helper Metrik Engagement ---
   function getMetricValue(container, testId) {
     const btn = container.querySelector(`button[data-testid="${testId}"], a[data-testid="${testId}"]`);
     if (!btn) return '0';
@@ -88,7 +85,6 @@
     return match ? match[0] : ((viewsEl.innerText || '').trim() || '0');
   }
 
-  // --- Klik Tombol "Show more" Secara Selektif ---
   function clickExpandButtons() {
     if (!expandCheckbox || !expandCheckbox.checked) return;
     const now = Date.now();
@@ -119,44 +115,34 @@
     }
   }
 
-  // --- Pencarian Elemen Kandidat Tweet di DOM X ---
   function getTweetCandidates() {
-    // 1. Selector standar X
-    const articles = Array.from(document.querySelectorAll('article[data-testid="tweet"], article'));
-    if (articles.length > 0) {
-      return Array.from(new Set(articles));
-    }
+    const set = new Set();
 
-    // 2. Fallback ke cellInnerDiv / container yang memuat link /status/ dan teks
-    const cells = Array.from(document.querySelectorAll('[data-testid="cellInnerDiv"]'));
-    const fromCells = cells.filter(cell => {
-      if (cell.closest('[data-testid="tweet"]') || cell.closest('article')) return false;
-      return Boolean(cell.querySelector('a[href*="/status/"]') || cell.querySelector('[data-testid="tweetText"]'));
-    });
-    if (fromCells.length > 0) {
-      return Array.from(new Set(fromCells));
-    }
+    document.querySelectorAll('article[data-testid="tweet"], article').forEach(el => set.add(el));
 
-    // 3. Fallback terakhir dari tautan /status/
-    const statusLinks = Array.from(document.querySelectorAll('a[href*="/status/"]'));
-    const wrappers = [];
-    for (const link of statusLinks) {
-      const container = link.closest('article, [data-testid="cellInnerDiv"]') || link.parentElement?.parentElement?.parentElement;
-      if (container && !wrappers.includes(container)) {
-        wrappers.push(container);
+    document.querySelectorAll('[data-testid="cellInnerDiv"]').forEach(cell => {
+      if (cell.closest('article[data-testid="tweet"], article')) return;
+      if (cell.querySelector('a[href*="/status/"], [data-testid="tweetText"], [data-testid="User-Name"]')) {
+        set.add(cell);
       }
+    });
+
+    if (set.size === 0) {
+      document.querySelectorAll('a[href*="/status/"]').forEach(link => {
+        const wrapper = link.closest('article, [data-testid="cellInnerDiv"]') || link.parentElement?.parentElement?.parentElement;
+        if (wrapper) set.add(wrapper);
+      });
     }
-    return wrappers;
+
+    return Array.from(set);
   }
 
-  // --- Ekstraksi Teks & Metadata Tweet ---
   function extractTweetText(container) {
     const tweetTextEl = container.querySelector('div[data-testid="tweetText"], [data-testid="tweetText"]');
     if (tweetTextEl && (tweetTextEl.innerText || '').trim()) {
       return tweetTextEl.innerText.trim();
     }
 
-    // Fallback: ambil elemen teks berbahasa/berisi konten yang bukan bagian User-Name atau waktu
     const textBlocks = Array.from(container.querySelectorAll('div[lang], span[lang]')).filter(el => {
       if (el.closest('[data-testid="User-Name"]')) return false;
       if (el.closest('time')) return false;
@@ -164,7 +150,6 @@
     });
 
     if (textBlocks.length > 0) {
-      // Utamakan elemen terluar/terpanjang agar tidak terduplikasi
       const sorted = textBlocks
         .map(el => el.innerText.trim())
         .filter(Boolean)
@@ -293,7 +278,6 @@
     console.debug(`[Auto-Scraper] Candidates: ${candidates.length} | Tersimpan: ${tweetsMap.size}`);
   }
 
-  // --- Kontrol Auto-Scroll ---
   function startAutoScroll() {
     if (isScraping) return;
     isScraping = true;
@@ -321,10 +305,13 @@
       const step = Math.round(window.innerHeight * 0.72);
       window.scrollBy({ top: step, behavior: 'instant' });
 
+      setTimeout(() => {
+        if (isScraping) scrapeVisibleTweets();
+      }, 350);
+
       const currentHeight = Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0);
       if (currentHeight === lastHeight) {
         noChangeCount++;
-        // Jalankan satu kali scraping ekstra sebelum berhenti
         scrapeVisibleTweets();
         if (noChangeCount >= 12) {
           stopAutoScroll();
@@ -351,7 +338,6 @@
     }
   }
 
-  // --- Format Markdown ---
   function formatTweetBlock(num, item, badgeLabel) {
     let block = `### ${num}. ${item.author}${badgeLabel ? ` [${badgeLabel}]` : ''}${item.timestamp ? ` (${item.timestamp})` : ''}\n`;
     if (item.url) {
@@ -460,7 +446,6 @@
     setTimeout(() => URL.revokeObjectURL(link.href), 1000);
   }
 
-  // --- Floating UI Widget ---
   function initUI() {
     if (!document.body || document.getElementById('x-auto-scraper-panel')) return;
 
@@ -588,7 +573,6 @@
 
   initUI();
 
-  // Pantau navigasi SPA di X & pastikan panel tetap ada bila DOM di-reset
   setInterval(() => {
     if (!document.getElementById('x-auto-scraper-panel')) {
       initUI();
