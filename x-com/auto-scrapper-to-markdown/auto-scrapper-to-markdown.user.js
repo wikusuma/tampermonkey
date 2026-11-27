@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Auto-Scraper to Markdown
 // @namespace    http://tampermonkey.net/
-// @version      1.7
-// @description  Auto scrape search + buka thread hanya untuk postingan yang punya reply (> 0), atau auto-scroll satu postingan/thread penuh beserta balasan ke Markdown.
+// @version      1.8
+// @description  Auto scrape search + buka thread hanya untuk postingan yang punya reply (> 0), expand "Show more" penuh, dan ekspor ke Markdown.
 // @author       You
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -14,7 +14,7 @@
 (function () {
   'use strict';
 
-  const STORAGE_KEY = 'x_auto_scraper_v17_state';
+  const STORAGE_KEY = 'x_auto_scraper_v18_state';
 
   let isScraping = false;
   let isExporting = false;
@@ -157,19 +157,57 @@
     return Math.round(num);
   }
 
-  function getMetricValue(container, testId) {
-    const btn = container.querySelector(
-      `button[data-testid="${testId}"], a[data-testid="${testId}"], [data-testid="${testId}"]`
-    );
-    if (!btn) return '0';
+  function extractMetricFromElement(el) {
+    if (!el) return '';
+    const textSpan = el.querySelector('span[data-testid="app-text-transition-container"]') || el.querySelector('span');
+    const textVal = textSpan ? (textSpan.innerText || '').trim() : (el.innerText || '').trim();
+    if (textVal && /^\d[\d,\.]*\s*[KMB]?$/i.test(textVal)) {
+      return textVal.trim();
+    }
 
-    const textSpan = btn.querySelector('span[data-testid="app-text-transition-container"]') || btn.querySelector('span');
-    const textVal = textSpan ? (textSpan.innerText || '').trim() : (btn.innerText || '').trim();
-    if (textVal && /\d/.test(textVal)) return textVal;
-
-    const aria = btn.getAttribute('aria-label') || '';
+    const aria = el.getAttribute('aria-label') || '';
     const ariaMatch = aria.match(/(\d[\d,\.]*\s*[KMB]?)/i);
     if (ariaMatch) return ariaMatch[1].trim();
+
+    const innerMatch = (el.innerText || '').trim().match(/(\d[\d,\.]*\s*[KMB]?)/i);
+    return innerMatch ? innerMatch[1].trim() : '';
+  }
+
+  function getMetricValue(container, testId) {
+    const directBtn = container.querySelector(
+      `button[data-testid="${testId}"], a[data-testid="${testId}"], [data-testid="${testId}"]`
+    );
+    const directVal = extractMetricFromElement(directBtn);
+    if (directVal) return directVal;
+
+    // Fallback berdasarkan aria-label atau urutan tombol di action bar
+    const keywordsByType = {
+      reply: [/repl/i, /balas/i],
+      retweet: [/repost/i, /retweet/i, /posting ulang/i],
+      like: [/like/i, /suka/i],
+      bookmark: [/bookmark/i, /markah/i, /simpan/i]
+    };
+
+    const patterns = keywordsByType[testId] || [];
+    const actionEls = Array.from(container.querySelectorAll('button, [role="button"], a[role="link"]'));
+    for (const el of actionEls) {
+      const aria = el.getAttribute('aria-label') || '';
+      if (patterns.some(rx => rx.test(aria))) {
+        const val = extractMetricFromElement(el);
+        if (val) return val;
+      }
+    }
+
+    // Fallback indeks standar action bar X: [0]=reply, [1]=repost, [2]=like, [3]=views/bookmark
+    const group = container.querySelector('div[role="group"]');
+    if (group) {
+      const groupButtons = Array.from(group.querySelectorAll('button, [role="button"]'));
+      const indexMap = { reply: 0, retweet: 1, like: 2 };
+      if (testId in indexMap && groupButtons[indexMap[testId]]) {
+        const val = extractMetricFromElement(groupButtons[indexMap[testId]]);
+        if (val) return val;
+      }
+    }
 
     return '0';
   }
@@ -178,21 +216,45 @@
     const viewsEl = container.querySelector(
       'a[href*="/analytics"], a[href*="/status/"][aria-label*="views" i], a[aria-label*="views" i], a[aria-label*="tayangan" i]'
     );
-    if (!viewsEl) return '0';
+    const val = extractMetricFromElement(viewsEl);
+    if (val) return val;
 
-    const viewsSpan = viewsEl.querySelector('span[data-testid="app-text-transition-container"]') || viewsEl.querySelector('span');
-    const spanText = viewsSpan ? (viewsSpan.innerText || '').trim() : '';
-    if (spanText && /\d/.test(spanText)) return spanText;
+    const group = container.querySelector('div[role="group"]');
+    if (group) {
+      const linksAndBtns = Array.from(group.querySelectorAll('a, button, [role="button"]'));
+      for (const el of linksAndBtns) {
+        const aria = el.getAttribute('aria-label') || '';
+        const href = el.getAttribute('href') || '';
+        if (href.includes('/analytics') || /views|tayangan/i.test(aria)) {
+          const v = extractMetricFromElement(el);
+          if (v) return v;
+        }
+      }
+    }
 
-    const aria = viewsEl.getAttribute('aria-label') || '';
-    const match = aria.match(/(\d[\d,\.]*\s*[KMB]?)/i);
-    return match ? match[1].trim() : ((viewsEl.innerText || '').trim() || '0');
+    return '0';
+  }
+
+  function expandInlineShowMoreInContainer(container) {
+    if (!expandCheckbox || !expandCheckbox.checked || !container) return;
+    const inlineTriggers = ['show more', 'lihat lainnya', 'tampilkan lainnya', 'see more'];
+    const clickables = Array.from(container.querySelectorAll('span, a, div[role="button"], button'));
+    for (const el of clickables) {
+      const txt = (el.innerText || '').trim().toLowerCase();
+      if (inlineTriggers.includes(txt)) {
+        try {
+          el.click();
+        } catch (err) {
+          console.debug('[Auto-Scraper] Gagal expand inline Show more:', err);
+        }
+      }
+    }
   }
 
   function clickExpandButtons() {
     if (!expandCheckbox || !expandCheckbox.checked) return;
     const now = Date.now();
-    if (now - expandTimer < 2000) return;
+    if (now - expandTimer < 1800) return;
     expandTimer = now;
 
     const triggers = new Set([
@@ -207,7 +269,7 @@
       'tampilkan lainnya'
     ]);
 
-    const candidates = document.querySelectorAll('div[role="button"], button, a[role="link"]');
+    const candidates = document.querySelectorAll('div[role="button"], button, a[role="link"], span');
     for (const el of candidates) {
       const text = (el.innerText || '').trim().toLowerCase();
       if (triggers.has(text)) {
@@ -216,7 +278,6 @@
         } catch (err) {
           console.debug('[Auto-Scraper] Gagal klik tombol expand:', err);
         }
-        break;
       }
     }
   }
@@ -243,10 +304,19 @@
     return Array.from(set);
   }
 
+  function cleanTweetText(rawText) {
+    if (!rawText) return '';
+    return rawText
+      .replace(/\s*(Show more|Tampilkan lainnya|Lihat lainnya)\s*$/i, '')
+      .trim();
+  }
+
   function extractTweetText(container) {
+    expandInlineShowMoreInContainer(container);
+
     const tweetTextEl = container.querySelector('div[data-testid="tweetText"], [data-testid="tweetText"]');
     if (tweetTextEl && (tweetTextEl.innerText || '').trim()) {
-      return tweetTextEl.innerText.trim();
+      return cleanTweetText(tweetTextEl.innerText);
     }
 
     const textBlocks = Array.from(container.querySelectorAll('div[lang], span[lang]')).filter(el => {
@@ -257,7 +327,7 @@
 
     if (textBlocks.length > 0) {
       const sorted = textBlocks
-        .map(el => el.innerText.trim())
+        .map(el => cleanTweetText(el.innerText))
         .filter(Boolean)
         .sort((a, b) => b.length - a.length);
       return sorted[0] || '';
@@ -325,7 +395,6 @@
       const bookmarks = getMetricValue(container, 'bookmark');
       const views = getViewsValue(container);
 
-      // Hanya buka thread jika berada di halaman Search, opsi aktif, dan jumlah reply > 0
       if (isSearchPage() && drillSearchCheckbox && drillSearchCheckbox.checked && tweetUrl && replyCountNum > 0) {
         enqueueThreadUrlIfHasReplies(tweetUrl, replyCountNum);
       }
@@ -376,18 +445,23 @@
         const updated = {
           ...prev,
           role: (prev.role === 'timeline' || prev.role === 'search_result') && role !== prev.role ? role : prev.role,
-          content: prev.content || payload.content,
+          content: (tweetText && tweetText.length > (prev.content || '').length) ? tweetText : (prev.content || payload.content),
           url: prev.url || payload.url,
           timestamp: prev.timestamp || payload.timestamp,
           replies: (replyCountNum > (prev.replyCountNum || 0)) ? replies : prev.replies,
-          replyCountNum: Math.max(prev.replyCountNum || 0, replyCountNum)
+          replyCountNum: Math.max(prev.replyCountNum || 0, replyCountNum),
+          reposts: reposts !== '0' ? reposts : prev.reposts,
+          likes: likes !== '0' ? likes : prev.likes,
+          views: views !== '0' ? views : prev.views
         };
         if (
           updated.role !== prev.role ||
           updated.content !== prev.content ||
           updated.url !== prev.url ||
           updated.timestamp !== prev.timestamp ||
-          updated.replyCountNum !== (prev.replyCountNum || 0)
+          updated.replyCountNum !== (prev.replyCountNum || 0) ||
+          updated.likes !== prev.likes ||
+          updated.views !== prev.views
         ) {
           tweetsMap.set(tweetId, updated);
           updateUI();
@@ -447,7 +521,6 @@
     }
 
     if (searchOriginUrl && location.href !== searchOriginUrl) {
-      const origin = searchOriginUrl;
       searchOriginUrl = '';
       currentDrillUrl = '';
       isScraping = false;
@@ -500,7 +573,7 @@
 
       setTimeout(() => {
         if (isScraping) scrapeVisibleTweets();
-      }, 350);
+      }, 450);
 
       const currentHeight = Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0);
       if (currentHeight === lastHeight) {
@@ -517,7 +590,7 @@
         noChangeCount = 0;
         lastHeight = currentHeight;
       }
-    }, 1500);
+    }, 1600);
   }
 
   function stopAutoScroll() {
@@ -541,7 +614,7 @@
       block += `**Link:** [Lihat Tweet](${item.url})\n\n`;
     }
     block += `> 💬 **Replies:** ${item.replies} | 🔁 **Reposts:** ${item.reposts} | ❤️ **Likes:** ${item.likes} | 📊 **Views:** ${item.views} | 🔖 **Bookmarks:** ${item.bookmarks}\n\n`;
-    block += `${(item.content || '').replace(/\n/g, '\n\n')}\n\n`;
+    block += `${cleanTweetText(item.content || '').replace(/\n/g, '\n\n')}\n\n`;
     block += `---\n\n`;
     return block;
   }
