@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Auto-Scraper to Markdown
 // @namespace    http://tampermonkey.net/
-// @version      1.8
-// @description  Auto scrape search + buka thread hanya untuk postingan yang punya reply (> 0), expand "Show more" penuh, dan ekspor ke Markdown.
+// @version      1.9
+// @description  Auto scrape search + thread (reply > 0), bangun hierarki reply/sub-reply bertingkat dengan indentation & tag mirip XML ke Markdown.
 // @author       You
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -14,7 +14,7 @@
 (function () {
   'use strict';
 
-  const STORAGE_KEY = 'x_auto_scraper_v18_state';
+  const STORAGE_KEY = 'x_auto_scraper_v19_state';
 
   let isScraping = false;
   let isExporting = false;
@@ -141,6 +141,13 @@
     return handleMatch ? handleMatch[1].toLowerCase() : '';
   }
 
+  function extractReplyToHandle(container) {
+    const fullText = container.innerText || '';
+    const m = fullText.match(/Replying to\s+@([A-Za-z0-9_]+)|Membalas\s+@([A-Za-z0-9_]+)/i);
+    const handle = m ? (m[1] || m[2] || '').toLowerCase() : '';
+    return handle;
+  }
+
   function parseCountToNumber(rawVal) {
     if (!rawVal) return 0;
     const cleaned = String(rawVal).trim().replace(/,/g, '');
@@ -180,7 +187,6 @@
     const directVal = extractMetricFromElement(directBtn);
     if (directVal) return directVal;
 
-    // Fallback berdasarkan aria-label atau urutan tombol di action bar
     const keywordsByType = {
       reply: [/repl/i, /balas/i],
       retweet: [/repost/i, /retweet/i, /posting ulang/i],
@@ -198,7 +204,6 @@
       }
     }
 
-    // Fallback indeks standar action bar X: [0]=reply, [1]=repost, [2]=like, [3]=views/bookmark
     const group = container.querySelector('div[role="group"]');
     if (group) {
       const groupButtons = Array.from(group.querySelectorAll('button, [role="button"]'));
@@ -379,6 +384,45 @@
     queuedThreadUrls.push(url);
   }
 
+  function resolveParentAndDepth(ctx, statusId, handle, replyToHandle, allItemsList) {
+    const rootId = ctx.targetTweetId ? `id:${ctx.targetTweetId}` : '';
+
+    if (ctx.isThreadPage) {
+      if (statusId && statusId === ctx.targetTweetId) {
+        return { parentId: '', replyToHandle: '', depth: 0 };
+      }
+
+      // Cari item sebelumnya di halaman thread yang sesuai dengan replyToHandle
+      if (replyToHandle) {
+        for (let i = allItemsList.length - 1; i >= 0; i--) {
+          const cand = allItemsList[i];
+          if (cand.handle && cand.handle.toLowerCase() === replyToHandle) {
+            const nextDepth = (typeof cand.depth === 'number' ? cand.depth : 0) + 1;
+            return {
+              parentId: cand.id,
+              replyToHandle,
+              depth: Math.min(nextDepth, 6)
+            };
+          }
+        }
+      }
+
+      // Jika thread penulis lanjutan, kaitkan ke main post jika tersedia
+      if (handle && handle === ctx.targetHandle && rootId) {
+        return { parentId: rootId, replyToHandle: ctx.targetHandle, depth: 0 };
+      }
+
+      // Default reply pada halaman thread berada di bawah main post (depth 1)
+      return {
+        parentId: rootId || '',
+        replyToHandle: replyToHandle || ctx.targetHandle || '',
+        depth: 1
+      };
+    }
+
+    return { parentId: '', replyToHandle, depth: 0 };
+  }
+
   function extractTweetData(container) {
     try {
       const ctx = getStatusContext();
@@ -418,6 +462,16 @@
         }
       }
 
+      const rawReplyTo = extractReplyToHandle(container);
+      const currentList = Array.from(tweetsMap.values());
+      const { parentId, replyToHandle, depth } = resolveParentAndDepth(
+        ctx,
+        statusId,
+        handle,
+        rawReplyTo,
+        currentList
+      );
+
       const payload = {
         id: tweetId,
         statusId,
@@ -433,7 +487,10 @@
         likes,
         views,
         bookmarks,
-        role
+        role,
+        parentId,
+        replyToHandle,
+        depth
       };
 
       if (!tweetsMap.has(tweetId)) {
@@ -452,7 +509,10 @@
           replyCountNum: Math.max(prev.replyCountNum || 0, replyCountNum),
           reposts: reposts !== '0' ? reposts : prev.reposts,
           likes: likes !== '0' ? likes : prev.likes,
-          views: views !== '0' ? views : prev.views
+          views: views !== '0' ? views : prev.views,
+          parentId: prev.parentId || payload.parentId,
+          replyToHandle: prev.replyToHandle || payload.replyToHandle,
+          depth: Math.max(prev.depth || 0, depth)
         };
         if (
           updated.role !== prev.role ||
@@ -461,7 +521,9 @@
           updated.timestamp !== prev.timestamp ||
           updated.replyCountNum !== (prev.replyCountNum || 0) ||
           updated.likes !== prev.likes ||
-          updated.views !== prev.views
+          updated.views !== prev.views ||
+          updated.parentId !== prev.parentId ||
+          updated.depth !== (prev.depth || 0)
         ) {
           tweetsMap.set(tweetId, updated);
           updateUI();
@@ -608,15 +670,93 @@
     }
   }
 
-  function formatTweetBlock(num, item, badgeLabel) {
-    let block = `### ${num}. ${item.author}${badgeLabel ? ` [${badgeLabel}]` : ''}${item.timestamp ? ` (${item.timestamp})` : ''}\n`;
-    if (item.url) {
-      block += `**Link:** [Lihat Tweet](${item.url})\n\n`;
+  function escapeXmlAttr(val) {
+    return String(val || '')
+      .replace(/&/g, '&amp;')
+      .replace(/"/g, '&quot;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
+  function escapeXmlText(val) {
+    return String(val || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
+  function formatIndentedTweetBlock(item, badgeLabel, depthLevel) {
+    const depth = Math.max(0, Number(depthLevel) || 0);
+    const indent = '  '.repeat(depth);
+    const quotePrefix = depth > 0 ? `${indent}> ` : '';
+    const levelTag = depth === 0
+      ? (badgeLabel || 'POST')
+      : `REPLY L${depth}`;
+
+    const cleanContent = cleanTweetText(item.content || '');
+    const formattedContent = cleanContent
+      .split('\n')
+      .filter(line => line.trim().length > 0 || line === '')
+      .map(line => `${quotePrefix}${line}`)
+      .join('\n\n');
+
+    let out = '';
+    out += `${indent}- **${item.author}** \`[${levelTag}]\`${item.timestamp ? ` *(${item.timestamp})*` : ''}`;
+    if (item.replyToHandle) {
+      out += ` → *replying to @${item.replyToHandle}*`;
     }
-    block += `> 💬 **Replies:** ${item.replies} | 🔁 **Reposts:** ${item.reposts} | ❤️ **Likes:** ${item.likes} | 📊 **Views:** ${item.views} | 🔖 **Bookmarks:** ${item.bookmarks}\n\n`;
-    block += `${cleanTweetText(item.content || '').replace(/\n/g, '\n\n')}\n\n`;
-    block += `---\n\n`;
-    return block;
+    if (item.url) {
+      out += ` — [Link](${item.url})`;
+    }
+    out += `\n`;
+    out += `${quotePrefix}> 💬 **Replies:** ${item.replies} | 🔁 **Reposts:** ${item.reposts} | ❤️ **Likes:** ${item.likes} | 📊 **Views:** ${item.views} | 🔖 **Bookmarks:** ${item.bookmarks}\n\n`;
+    if (formattedContent) {
+      out += `${formattedContent}\n\n`;
+    }
+
+    const xmlTag = depth === 0 ? 'post' : 'reply';
+    out += `${indent}\`\`\`xml\n`;
+    out += `${indent}<${xmlTag} id="${escapeXmlAttr(item.id)}" role="${escapeXmlAttr(item.role)}" depth="${depth}" author="${escapeXmlAttr(item.author)}" handle="${escapeXmlAttr(item.handle)}" parent_id="${escapeXmlAttr(item.parentId || '')}" reply_to="${escapeXmlAttr(item.replyToHandle || '')}" timestamp="${escapeXmlAttr(item.timestamp || '')}" url="${escapeXmlAttr(item.url || '')}">\n`;
+    out += `${indent}  <metrics replies="${escapeXmlAttr(item.replies)}" reposts="${escapeXmlAttr(item.reposts)}" likes="${escapeXmlAttr(item.likes)}" views="${escapeXmlAttr(item.views)}" bookmarks="${escapeXmlAttr(item.bookmarks)}" />\n`;
+    out += `${indent}  <content>${escapeXmlText(cleanContent)}</content>\n`;
+    out += `${indent}</${xmlTag}>\n`;
+    out += `${indent}\`\`\`\n\n`;
+    return out;
+  }
+
+  function renderTreeNodes(nodes, childrenMap, badgeFn, fallbackDepth = 0) {
+    let md = '';
+    const visitedInRender = new Set();
+
+    function walk(node, currentDepth) {
+      if (!node || visitedInRender.has(node.id)) return;
+      visitedInRender.add(node.id);
+
+      const effectiveDepth = Math.max(currentDepth, Number(node.depth) || 0);
+      md += formatIndentedTweetBlock(node, badgeFn(node, effectiveDepth), effectiveDepth);
+
+      const kids = childrenMap.get(node.id) || [];
+      for (const child of kids) {
+        walk(child, effectiveDepth + 1);
+      }
+    }
+
+    for (const n of nodes) {
+      walk(n, fallbackDepth);
+    }
+
+    // Pastikan item yang terikat parentId tertentu tapi belum ter-walk juga tetap tercetak
+    for (const [parentId, kids] of childrenMap.entries()) {
+      for (const child of kids) {
+        if (!visitedInRender.has(child.id)) {
+          const d = Math.max(1, Number(child.depth) || 1);
+          md += formatIndentedTweetBlock(child, badgeFn(child, d), d);
+          visitedInRender.add(child.id);
+        }
+      }
+    }
+
+    return md;
   }
 
   function generateMarkdown() {
@@ -629,6 +769,14 @@
     const searchItems = allItems.filter(i => i.role === 'search_result');
     const timelineItems = allItems.filter(i => i.role === 'timeline');
 
+    const childrenMap = new Map();
+    for (const item of allItems) {
+      if (item.parentId) {
+        if (!childrenMap.has(item.parentId)) childrenMap.set(item.parentId, []);
+        childrenMap.get(item.parentId).push(item);
+      }
+    }
+
     let md = `# Arsip Postingan & Sentimen X (Twitter)\n`;
     md += `- **Tanggal Ekspor:** ${new Date().toLocaleString()}\n`;
     md += `- **URL Sumber:** ${searchOriginUrl || location.href}\n`;
@@ -638,49 +786,59 @@
         ? mainAndThread.length
         : (mainAndThread.length + otherReplies.length + searchItems.length + timelineItems.length);
 
-      md += `- **Mode:** Single Post / Thread + Balasan\n`;
+      md += `- **Mode:** Single Post / Thread + Hierarki Balasan (Indentation + XML Tags)\n`;
       md += `- **Total Item Diekspor:** ${exportedCount} (Utama & Thread: ${mainAndThread.length}, Balasan/Sentimen: ${otherReplies.length})\n\n---\n\n`;
 
       if (mainAndThread.length > 0) {
         md += `## Postingan Utama & Rangkaian Thread Penulis\n\n`;
-        let idx = 1;
-        for (const item of mainAndThread) {
-          const tag = item.role === 'main' ? 'POSTINGAN UTAMA' : 'THREAD PENULIS';
-          md += formatTweetBlock(idx++, item, tag);
-        }
+        md += renderTreeNodes(
+          mainAndThread,
+          childrenMap,
+          (item) => (item.role === 'main' ? 'POSTINGAN UTAMA' : 'THREAD PENULIS'),
+          0
+        );
       }
 
       if (!threadOnly && otherReplies.length > 0) {
-        md += `## Balasan & Sentimen Komentar\n\n`;
-        let idx = 1;
-        for (const item of otherReplies) {
-          md += formatTweetBlock(idx++, item, 'BALASAN / SENTIMEN');
+        md += `## Balasan & Sentimen Komentar (Bertingkat)\n\n`;
+        const topLevelReplies = otherReplies.filter(r => !r.parentId || !tweetsMap.has(r.parentId) || tweetsMap.get(r.parentId)?.role === 'main');
+        const nestedOrOtherReplies = otherReplies.filter(r => !topLevelReplies.includes(r));
+
+        md += renderTreeNodes(
+          topLevelReplies,
+          childrenMap,
+          (_item, d) => `BALASAN L${Math.max(1, d)}`,
+          1
+        );
+
+        if (nestedOrOtherReplies.length > 0) {
+          md += renderTreeNodes(
+            nestedOrOtherReplies,
+            childrenMap,
+            (_item, d) => `SUB-BALASAN L${Math.max(2, d)}`,
+            2
+          );
         }
       }
 
       if (!threadOnly && searchItems.length > 0) {
         md += `## Hasil Pencarian (Ringkasan Awal)\n\n`;
-        let idx = 1;
-        for (const item of searchItems) {
-          md += formatTweetBlock(idx++, item, 'SEARCH');
-        }
+        md += renderTreeNodes(searchItems, childrenMap, () => 'SEARCH', 0);
       }
 
       if (!threadOnly && timelineItems.length > 0) {
         md += `## Postingan Lain di Halaman\n\n`;
-        let idx = 1;
-        for (const item of timelineItems) {
-          md += formatTweetBlock(idx++, item, 'TIMELINE');
-        }
+        md += renderTreeNodes(timelineItems, childrenMap, () => 'TIMELINE', 0);
       }
     } else {
       md += `- **Mode:** Search / Timeline\n`;
       md += `- **Total Postingan:** ${allItems.length}\n\n---\n\n`;
-      let idx = 1;
-      for (const item of allItems) {
-        const tag = item.role === 'search_result' ? 'SEARCH' : '';
-        md += formatTweetBlock(idx++, item, tag);
-      }
+      md += renderTreeNodes(
+        allItems,
+        childrenMap,
+        (item) => (item.role === 'search_result' ? 'SEARCH' : 'POST'),
+        0
+      );
     }
 
     return md;
