@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Auto-Scraper to Markdown
 // @namespace    http://tampermonkey.net/
-// @version      1.4
-// @description  Auto scroll timeline, pencarian, atau thread postingan X, ekstrak postingan & metrik, dan simpan sebagai Markdown.
+// @version      1.5
+// @description  Auto scrape search + thread lanjutan, atau auto-scroll satu postingan/thread penuh beserta sentimen balasannya ke Markdown.
 // @author       You
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -22,13 +22,25 @@
   let lastHeight = 0;
   let lastUrl = location.href;
 
+  // State khusus Mode Search -> Drill Thread
+  let queuedThreadUrls = [];
+  let visitedThreadIds = new Set();
+  let searchOriginUrl = '';
+  let currentDrillUrl = '';
+  let maxSearchThreads = 15;
+
   let modeBadge = null;
   let statusText = null;
   let threadOnlyCheckbox = null;
   let expandCheckbox = null;
+  let drillSearchCheckbox = null;
   let startBtn = null;
   let exportBtn = null;
   let clearBtn = null;
+
+  function isSearchPage() {
+    return location.pathname.startsWith('/search');
+  }
 
   function getStatusContext() {
     const match = location.pathname.match(/^\/([^/]+)\/status\/(\d+)/);
@@ -88,7 +100,7 @@
   function clickExpandButtons() {
     if (!expandCheckbox || !expandCheckbox.checked) return;
     const now = Date.now();
-    if (now - expandTimer < 2200) return;
+    if (now - expandTimer < 2000) return;
     expandTimer = now;
 
     const triggers = new Set([
@@ -96,12 +108,14 @@
       'show probable spam',
       'show additional replies',
       'show this thread',
+      'show more',
       'tampilkan balasan lainnya',
       'tampilkan utas ini',
-      'tampilkan lebih banyak balasan'
+      'tampilkan lebih banyak balasan',
+      'tampilkan lainnya'
     ]);
 
-    const candidates = document.querySelectorAll('div[role="button"], button');
+    const candidates = document.querySelectorAll('div[role="button"], button, a[role="link"]');
     for (const el of candidates) {
       const text = (el.innerText || '').trim().toLowerCase();
       if (triggers.has(text)) {
@@ -194,6 +208,15 @@
     return { author, handle };
   }
 
+  function enqueueThreadUrl(url) {
+    if (!url) return;
+    const id = extractTweetIdFromUrl(url);
+    if (!id || visitedThreadIds.has(id)) return;
+    if (queuedThreadUrls.some(u => extractTweetIdFromUrl(u) === id)) return;
+    if (visitedThreadIds.size + queuedThreadUrls.length >= maxSearchThreads) return;
+    queuedThreadUrls.push(url);
+  }
+
   function extractTweetData(container) {
     try {
       const ctx = getStatusContext();
@@ -202,6 +225,10 @@
       const tweetText = extractTweetText(container);
 
       if (!tweetText && !tweetUrl) return;
+
+      if (isSearchPage() && drillSearchCheckbox && drillSearchCheckbox.checked && tweetUrl) {
+        enqueueThreadUrl(tweetUrl);
+      }
 
       const rawTextSnippet = (container.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 100);
       const fallbackId = `${handle || 'unknown'}|${rawTextSnippet}|${ctx.targetTweetId || 'feed'}`;
@@ -217,7 +244,7 @@
       const bookmarks = getMetricValue(container, 'bookmark');
       const views = getViewsValue(container);
 
-      let role = 'timeline';
+      let role = isSearchPage() ? 'search_result' : 'timeline';
       if (ctx.isThreadPage) {
         if (statusId && statusId === ctx.targetTweetId) {
           role = 'main';
@@ -235,6 +262,7 @@
         handle,
         timestamp,
         url: tweetUrl,
+        sourceContext: currentDrillUrl || location.href,
         content: tweetText,
         replies,
         reposts,
@@ -251,7 +279,7 @@
         const prev = tweetsMap.get(tweetId);
         const updated = {
           ...prev,
-          role: (prev.role === 'timeline' && role !== 'timeline') ? role : prev.role,
+          role: (prev.role === 'timeline' || prev.role === 'search_result') && role !== prev.role ? role : prev.role,
           content: prev.content || payload.content,
           url: prev.url || payload.url,
           timestamp: prev.timestamp || payload.timestamp
@@ -275,12 +303,43 @@
     clickExpandButtons();
     const candidates = getTweetCandidates();
     candidates.forEach(extractTweetData);
-    console.debug(`[Auto-Scraper] Candidates: ${candidates.length} | Tersimpan: ${tweetsMap.size}`);
+    console.debug(`[Auto-Scraper] Candidates: ${candidates.length} | Tersimpan: ${tweetsMap.size} | Queue Thread: ${queuedThreadUrls.length}`);
+  }
+
+  function advanceToNextQueuedThread() {
+    while (queuedThreadUrls.length > 0) {
+      const nextUrl = queuedThreadUrls.shift();
+      const nextId = extractTweetIdFromUrl(nextUrl);
+      if (!nextId || visitedThreadIds.has(nextId)) continue;
+
+      visitedThreadIds.add(nextId);
+      currentDrillUrl = nextUrl;
+      noChangeCount = 0;
+      lastHeight = 0;
+      window.scrollTo({ top: 0, behavior: 'instant' });
+      location.href = nextUrl;
+      return true;
+    }
+
+    if (searchOriginUrl && location.href !== searchOriginUrl) {
+      const origin = searchOriginUrl;
+      searchOriginUrl = '';
+      currentDrillUrl = '';
+      location.href = origin;
+    }
+    return false;
   }
 
   function startAutoScroll() {
     if (isScraping) return;
     isScraping = true;
+
+    if (isSearchPage() && drillSearchCheckbox && drillSearchCheckbox.checked) {
+      searchOriginUrl = location.href;
+      if (expandCheckbox) expandCheckbox.checked = true;
+    } else if (getStatusContext().isThreadPage) {
+      if (expandCheckbox) expandCheckbox.checked = true;
+    }
 
     if (startBtn) {
       startBtn.innerText = 'Stop Scraping';
@@ -297,6 +356,7 @@
       if (location.href !== lastUrl) {
         lastUrl = location.href;
         noChangeCount = 0;
+        lastHeight = 0;
         updateUI();
       }
 
@@ -313,9 +373,13 @@
       if (currentHeight === lastHeight) {
         noChangeCount++;
         scrapeVisibleTweets();
-        if (noChangeCount >= 12) {
+        if (noChangeCount >= 10) {
+          const canDrill = isSearchPage() && drillSearchCheckbox && drillSearchCheckbox.checked;
+          if (canDrill && advanceToNextQueuedThread()) {
+            return;
+          }
           stopAutoScroll();
-          alert('Sudah mencapai bagian paling bawah atau limit feed tercapai.');
+          alert('Sudah mencapai bagian paling bawah atau seluruh antrean thread selesai.');
         }
       } else {
         noChangeCount = 0;
@@ -356,19 +420,20 @@
 
     const mainAndThread = allItems.filter(i => i.role === 'main' || i.role === 'thread');
     const otherReplies = allItems.filter(i => i.role === 'reply');
+    const searchItems = allItems.filter(i => i.role === 'search_result');
     const timelineItems = allItems.filter(i => i.role === 'timeline');
 
-    let md = `# Arsip Postingan X (Twitter)\n`;
+    let md = `# Arsip Postingan & Sentimen X (Twitter)\n`;
     md += `- **Tanggal Ekspor:** ${new Date().toLocaleString()}\n`;
-    md += `- **URL Sumber:** ${location.href}\n`;
+    md += `- **URL Sumber:** ${searchOriginUrl || location.href}\n`;
 
     if (ctx.isThreadPage || mainAndThread.length > 0 || otherReplies.length > 0) {
       const exportedCount = threadOnly
         ? mainAndThread.length
-        : (mainAndThread.length + otherReplies.length + timelineItems.length);
+        : (mainAndThread.length + otherReplies.length + searchItems.length + timelineItems.length);
 
-      md += `- **Mode:** Thread / Postingan Detail\n`;
-      md += `- **Total Item Diekspor:** ${exportedCount} (Utama & Thread: ${mainAndThread.length}, Balasan Lain: ${otherReplies.length})\n\n---\n\n`;
+      md += `- **Mode:** Single Post / Thread + Balasan\n`;
+      md += `- **Total Item Diekspor:** ${exportedCount} (Utama & Thread: ${mainAndThread.length}, Balasan/Sentimen: ${otherReplies.length})\n\n---\n\n`;
 
       if (mainAndThread.length > 0) {
         md += `## Postingan Utama & Rangkaian Thread Penulis\n\n`;
@@ -380,10 +445,18 @@
       }
 
       if (!threadOnly && otherReplies.length > 0) {
-        md += `## Komentar & Balasan Lain\n\n`;
+        md += `## Balasan & Sentimen Komentar\n\n`;
         let idx = 1;
         for (const item of otherReplies) {
-          md += formatTweetBlock(idx++, item, 'BALASAN');
+          md += formatTweetBlock(idx++, item, 'BALASAN / SENTIMEN');
+        }
+      }
+
+      if (!threadOnly && searchItems.length > 0) {
+        md += `## Hasil Pencarian (Ringkasan Awal)\n\n`;
+        let idx = 1;
+        for (const item of searchItems) {
+          md += formatTweetBlock(idx++, item, 'SEARCH');
         }
       }
 
@@ -395,11 +468,12 @@
         }
       }
     } else {
-      md += `- **Mode:** Timeline / Feed\n`;
+      md += `- **Mode:** Search / Timeline\n`;
       md += `- **Total Postingan:** ${allItems.length}\n\n---\n\n`;
       let idx = 1;
       for (const item of allItems) {
-        md += formatTweetBlock(idx++, item, '');
+        const tag = item.role === 'search_result' ? 'SEARCH' : '';
+        md += formatTweetBlock(idx++, item, tag);
       }
     }
 
@@ -466,7 +540,7 @@
       gap: 8px;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       border: 1px solid #38444d;
-      width: 204px;
+      width: 224px;
     `;
 
     modeBadge = document.createElement('div');
@@ -492,8 +566,11 @@
     const threadOnlyToggle = createToggleRow('Thread penulis saja (saat di status)', false);
     threadOnlyCheckbox = threadOnlyToggle.cb;
 
-    const expandToggle = createToggleRow('Auto-klik "Show more"', false);
+    const expandToggle = createToggleRow('Auto-klik "Show more"', true);
     expandCheckbox = expandToggle.cb;
+
+    const drillToggle = createToggleRow('Buka thread tiap hasil Search', false);
+    drillSearchCheckbox = drillToggle.cb;
 
     startBtn = document.createElement('button');
     startBtn.innerText = 'Start Auto-Scroll';
@@ -539,6 +616,10 @@
     `;
     clearBtn.onclick = () => {
       tweetsMap.clear();
+      queuedThreadUrls = [];
+      visitedThreadIds.clear();
+      searchOriginUrl = '';
+      currentDrillUrl = '';
       updateUI();
     };
 
@@ -546,6 +627,7 @@
     panel.appendChild(statusText);
     panel.appendChild(threadOnlyToggle.row);
     panel.appendChild(expandToggle.row);
+    panel.appendChild(drillToggle.row);
     panel.appendChild(startBtn);
     panel.appendChild(exportBtn);
     panel.appendChild(clearBtn);
@@ -558,7 +640,13 @@
     if (!modeBadge || !statusText) return;
 
     const ctx = getStatusContext();
-    modeBadge.innerText = ctx.isThreadPage ? `Mode: Thread (@${ctx.targetHandle})` : 'Mode: Timeline / Search';
+    if (ctx.isThreadPage) {
+      modeBadge.innerText = `Mode: Thread (@${ctx.targetHandle})`;
+    } else if (isSearchPage()) {
+      modeBadge.innerText = 'Mode: Search + Thread';
+    } else {
+      modeBadge.innerText = 'Mode: Timeline';
+    }
 
     const items = Array.from(tweetsMap.values());
     const mainThreadCount = items.filter(i => i.role === 'main' || i.role === 'thread').length;
@@ -566,6 +654,8 @@
 
     if (ctx.isThreadPage || mainThreadCount > 0 || replyCount > 0) {
       statusText.innerText = `Thread: ${mainThreadCount} | Balasan: ${replyCount}`;
+    } else if (queuedThreadUrls.length > 0) {
+      statusText.innerText = `Tersimpan: ${tweetsMap.size} | Antrean: ${queuedThreadUrls.length}`;
     } else {
       statusText.innerText = `Tersimpan: ${tweetsMap.size} tweet`;
     }
